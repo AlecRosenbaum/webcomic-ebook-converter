@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webcomic → Kindle</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --text:#e7e9ee; --muted:#9aa3b2; --accent:#7c5cff; --accent2:#5cc8ff;
+    --good:#3ecf8e; --bad:#ff6b6b; --warn:#ffb454;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  header{
+    padding:18px 22px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;
+  }
+  header h1{font-size:18px; margin:0; font-weight:650}
+  header .sub{color:var(--muted); font-size:13px}
+  main{max-width:1100px; margin:0 auto; padding:20px 22px 80px}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:18px}
+  label{display:block; font-size:12px; color:var(--muted); margin:0 0 6px}
+  input[type=text], select, textarea{
+    width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:10px 12px; font:inherit; outline:none;
+  }
+  input[type=text]:focus, select:focus, textarea:focus{border-color:var(--accent)}
+  textarea{resize:vertical; min-height:70px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px}
+  .row{display:flex; gap:12px; flex-wrap:wrap}
+  .row > *{flex:1; min-width:160px}
+  .grow{flex:3}
+  button{
+    background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:10px 14px; font:inherit; cursor:pointer; transition:.12s;
+  }
+  button:hover{border-color:var(--accent); background:#232838}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button.sm{padding:6px 10px; font-size:12px}
+  .toolbar{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px}
+  .toolbar .spacer{flex:1}
+  .count{color:var(--muted); font-size:13px}
+  details{margin-top:12px}
+  summary{cursor:pointer; color:var(--muted); font-size:13px; user-select:none}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px}
+  .chap{grid-column:1/-1; display:flex; align-items:center; gap:10px; color:var(--accent2); font-size:12px; font-weight:600; border-top:1px solid var(--line); padding-top:12px; margin-top:4px}
+  .chap:first-child{border-top:none; padding-top:0; margin-top:0}
+  .chap .src{color:var(--muted); font-weight:400; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .card{
+    background:var(--panel2); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+    position:relative; cursor:grab; display:flex; flex-direction:column;
+  }
+  .card.dragging{opacity:.4}
+  .card.drop-before{box-shadow:-3px 0 0 var(--accent2)}
+  .card.drop-after{box-shadow:3px 0 0 var(--accent2)}
+  .card.off{opacity:.45}
+  .card .thumbwrap{position:relative; aspect-ratio:3/4; background:#0b0d11; display:flex; align-items:center; justify-content:center}
+  .card img{max-width:100%; max-height:100%; object-fit:contain; display:block}
+  .card .broken{color:var(--bad); font-size:12px; padding:8px; text-align:center}
+  .card .idx{
+    position:absolute; top:6px; left:6px; background:rgba(0,0,0,.65); color:#fff;
+    border-radius:6px; padding:2px 7px; font-size:12px; font-weight:600;
+  }
+  .card .chk{position:absolute; top:6px; right:6px; width:20px; height:20px; cursor:pointer}
+  .card .meta{padding:6px 8px; font-size:11px; color:var(--muted); border-top:1px solid var(--line); word-break:break-all}
+  .card .dim{color:var(--accent2)}
+  .log{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--muted);
+    background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+    max-height:160px; overflow:auto; white-space:pre-wrap; margin-top:12px;
+  }
+  .log .e{color:var(--bad)} .log .ok{color:var(--good)} .log .w{color:var(--warn)}
+  .progress{height:8px; background:var(--panel2); border-radius:99px; overflow:hidden; margin-top:12px; display:none}
+  .progress > div{height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent2)); transition:width .2s}
+  .hint{color:var(--muted); font-size:12px; margin-top:8px}
+  a.dl{color:var(--accent2)}
+  .pill{display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; background:#232838; color:var(--muted); border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Webcomic → Kindle</h1>
+  <span class="sub">Pull images from a page, pick &amp; order them, download a CBZ / EPUB — or a KCC-optimized Kindle EPUB</span>
+  <span id="serverStatus" class="pill" style="margin-left:auto"></span>
+</header>
+
+<main>
+  <div class="panel">
+    <label for="urls">Chapter / page URLs <span style="opacity:.6">— one per line, fetched in order and merged into one book</span></label>
+    <textarea id="urls" rows="4" placeholder="https://example.com/comic/chapter-1&#10;https://example.com/comic/chapter-2&#10;https://example.com/comic/chapter-3"></textarea>
+    <div class="row" style="margin-top:12px">
+      <div>
+        <label for="proxy">CORS proxy</label>
+        <select id="proxy">
+          <option value="local">localhost (python — recommended)</option>
+          <option value="corsproxy">corsproxy.io</option>
+          <option value="allorigins">allorigins.win</option>
+          <option value="codetabs">codetabs.com</option>
+          <option value="custom">custom…</option>
+          <option value="none">none (direct)</option>
+        </select>
+      </div>
+    </div>
+    <div id="customProxyWrap" style="display:none; margin-top:12px">
+      <label for="customProxy">Custom proxy prefix (the page URL gets URL-encoded and appended)</label>
+      <input id="customProxy" type="text" placeholder="https://my-proxy.example/?url=">
+    </div>
+    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
+      <button id="fetchBtn" class="primary">Fetch all</button>
+      <button id="clearBtn">Clear</button>
+    </div>
+    <div class="hint">Browsers can't read another site's pages/images without a proxy. Best option: launch with <code>./run.sh</code> and open the page it serves — the proxy (and KCC) run on the same local server, so leave this on “localhost”. Public proxies are a fallback. All packaging happens locally in your browser.</div>
+
+    <details>
+      <summary>Add image URLs manually (one per line)</summary>
+      <textarea id="manualUrls" placeholder="https://example.com/page-01.jpg&#10;https://example.com/page-02.jpg"></textarea>
+      <button id="addManualBtn" class="sm" style="margin-top:8px">Add these</button>
+    </details>
+
+    <div class="progress" id="fetchProgress"><div></div></div>
+    <div class="log" id="log" style="display:none"></div>
+  </div>
+
+  <div class="panel" id="resultsPanel" style="display:none">
+    <div class="toolbar">
+      <button class="sm" id="selAll">Select all</button>
+      <button class="sm" id="selNone">Deselect all</button>
+      <button class="sm" id="sortName">Sort by name</button>
+      <button class="sm" id="reverse">Reverse</button>
+      <button class="sm" id="cullSmall">Deselect small (&lt;300px)</button>
+      <span class="spacer"></span>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="hint" style="margin:-4px 0 12px">Chapters are grouped below in fetch order. Drag tiles to reorder; pages are numbered in this order across the whole book.</div>
+    <div class="grid" id="grid"></div>
+
+    <div class="row" style="margin-top:18px; align-items:flex-end">
+      <div class="grow">
+        <label for="fname">File name / title</label>
+        <input id="fname" type="text" placeholder="my-comic">
+      </div>
+      <div>
+        <label for="author">Author <span style="opacity:.6">(EPUB)</span></label>
+        <input id="author" type="text" placeholder="optional">
+      </div>
+      <div style="flex:0 0 auto; min-width:auto">
+        <label for="format">Format</label>
+        <select id="format">
+          <option value="kcc">E-reader EPUB — KCC optimized (KoLC)</option>
+          <option value="epub">EPUB (fixed layout)</option>
+          <option value="cbz">CBZ</option>
+        </select>
+      </div>
+      <div style="flex:0 0 auto; min-width:auto">
+        <button id="buildBtn" class="primary">Create EPUB</button>
+      </div>
+    </div>
+    <label id="rtlRow" style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--text); cursor:pointer">
+      <input type="checkbox" id="rtl" style="width:auto"> Right-to-left reading order (manga)
+    </label>
+    <div class="progress" id="buildProgress"><div></div></div>
+    <div id="buildStatus" class="hint"></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- elements ----------
+  const $ = id => document.getElementById(id);
+  const urlsEl=$('urls'), proxyEl=$('proxy'), customProxyWrap=$('customProxyWrap'), customProxyEl=$('customProxy');
+  const fetchBtn=$('fetchBtn'), clearBtn=$('clearBtn'), logEl=$('log');
+  const fetchProgress=$('fetchProgress'), buildProgress=$('buildProgress');
+  const resultsPanel=$('resultsPanel'), gridEl=$('grid'), countEl=$('count');
+  const fnameEl=$('fname'), buildBtn=$('buildBtn'), buildStatus=$('buildStatus');
+  const manualUrls=$('manualUrls'), addManualBtn=$('addManualBtn');
+  const authorEl=$('author'), formatEl=$('format'), rtlEl=$('rtl'), rtlRow=$('rtlRow');
+
+  // ---------- state ----------
+  let items = [];                 // {url, selected, naturalW, data, ext, chapter, chapterUrl}
+  let directMode = null;          // image fetch: null=unknown, true=direct CORS works, false=use proxy
+  let fetchedPages = new Set();   // page URLs already fetched (so re-clicking Fetch all only adds new ones)
+  let seenImages = new Set();     // image URLs already added (dedupes repeats across chapters)
+  let chapterCount = 0;           // number of pages/chapters pulled so far
+
+  // ---------- proxy ----------
+  const LOCAL_PORT = 8788;
+  // When the page is served by server.py, the proxy + KCC live on the same origin.
+  // Opened as a file://, fall back to the default localhost port.
+  const SERVED = location.protocol === 'http:' || location.protocol === 'https:';
+  const SERVER_BASE = SERVED ? location.origin : 'http://127.0.0.1:' + LOCAL_PORT;
+  let serverKcc = false; // set by the /health probe below
+  const PROXIES = {
+    local: u => SERVER_BASE + '/proxy?url=' + encodeURIComponent(u),
+    corsproxy: u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+    allorigins: u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    codetabs: u => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u),
+    none: u => u,
+    custom: u => (customProxyEl.value.trim() + encodeURIComponent(u)),
+  };
+  function proxify(u){ return (PROXIES[proxyEl.value] || PROXIES.none)(u); }
+
+  const savedProxy = localStorage.getItem('cbz_proxy');
+  if (savedProxy && PROXIES[savedProxy]) proxyEl.value = savedProxy;
+  const savedCustom = localStorage.getItem('cbz_custom_proxy');
+  if (savedCustom) customProxyEl.value = savedCustom;
+  proxyEl.addEventListener('change', () => {
+    localStorage.setItem('cbz_proxy', proxyEl.value);
+    customProxyWrap.style.display = proxyEl.value === 'custom' ? 'block' : 'none';
+  });
+  customProxyEl.addEventListener('change', () => localStorage.setItem('cbz_custom_proxy', customProxyEl.value.trim()));
+  if (proxyEl.value === 'custom') customProxyWrap.style.display = 'block';
+
+  // ---------- output format ----------
+  const savedFormat = localStorage.getItem('cbz_format');
+  if (['kcc','epub','cbz'].includes(savedFormat)) formatEl.value = savedFormat;
+  function syncFormatUI(){
+    const f = formatEl.value;
+    buildBtn.textContent = f==='kcc' ? 'Create Kindle EPUB' : (f==='epub' ? 'Create EPUB' : 'Create CBZ');
+    rtlRow.style.display = (f==='epub' || f==='kcc') ? 'flex' : 'none'; // manga (RTL) applies to both
+  }
+  formatEl.addEventListener('change', () => { localStorage.setItem('cbz_format', formatEl.value); syncFormatUI(); });
+  syncFormatUI();
+
+  // ---------- server / KCC availability ----------
+  const serverStatusEl = $('serverStatus');
+  function setStatus(text, good){ serverStatusEl.textContent = text; serverStatusEl.style.color = good ? 'var(--good)' : 'var(--muted)'; }
+  function annotateKcc(ok){
+    const opt = [...formatEl.options].find(o => o.value === 'kcc');
+    if (opt) opt.textContent = ok ? 'E-reader EPUB — KCC optimized (KoLC)' : 'E-reader EPUB — KCC (start ./run.sh)';
+    // If KCC isn't available and the user hasn't explicitly chosen it, fall back to EPUB.
+    if (!ok && formatEl.value === 'kcc' && !localStorage.getItem('cbz_format')) { formatEl.value = 'epub'; syncFormatUI(); }
+  }
+  (async () => {
+    if (!SERVED) { setStatus('file mode — open via ./run.sh for the proxy + KCC', false); annotateKcc(false); return; }
+    try {
+      const h = await (await fetch(SERVER_BASE + '/health')).json();
+      serverKcc = !!(h.kcc && h.sevenzip);
+      setStatus(serverKcc ? '● server connected · KCC ready' : '● server connected · KCC unavailable', serverKcc);
+      annotateKcc(serverKcc);
+    } catch (e) { setStatus('server not reachable', false); annotateKcc(false); }
+  })();
+
+  // ---------- logging ----------
+  function log(msg, cls){
+    logEl.style.display='block';
+    const span=document.createElement('span');
+    if(cls) span.className=cls;
+    span.textContent=msg+'\n';
+    logEl.appendChild(span);
+    logEl.scrollTop=logEl.scrollHeight;
+  }
+  function clearLog(){ logEl.textContent=''; logEl.style.display='none'; }
+
+  function setProgress(bar, frac){
+    const wrap = bar; const inner = bar.firstElementChild;
+    if(frac==null){ wrap.style.display='none'; inner.style.width='0'; return; }
+    wrap.style.display='block'; inner.style.width=Math.round(frac*100)+'%';
+  }
+
+  // ---------- fetch helpers ----------
+  async function fetchVia(u){
+    const res = await fetch(proxify(u), {redirect:'follow'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    return res;
+  }
+
+  // Fetch image bytes: try the CDN directly (no proxy) first, fall back to the
+  // proxy if CORS blocks it. After the first direct attempt we remember whether
+  // direct works for this site so we don't spam doomed requests.
+  async function fetchImageBytes(it){
+    let res=null, how='direct';
+    if(directMode!==false){
+      try{
+        const r=await fetch(it.url, {redirect:'follow'});
+        if(!r.ok) throw Object.assign(new Error('HTTP '+r.status), {http:true});
+        res=r; if(directMode===null) directMode=true;
+      }catch(e){
+        // network/CORS failure (not a real HTTP status) => direct won't work here
+        if(!e.http && directMode===null) directMode=false;
+        res=null;
+      }
+    }
+    if(!res){ res=await fetchVia(it.url); how='proxy'; }
+    const blob=await res.blob();
+    const data=new Uint8Array(await blob.arrayBuffer());
+    if(!data.length) throw new Error('empty');
+    it.data=data;
+    it.ext=extFromTypeOrUrl(res.headers.get('content-type'), it.url);
+    return how;
+  }
+
+  // ---------- extraction ----------
+  const IMG_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)(\?|#|$)/i;
+
+  function abs(href, base){
+    try { return new URL(href, base).href; } catch { return null; }
+  }
+  function pickFromSrcset(ss){
+    // return the URL with the largest descriptor
+    const parts = ss.split(',').map(s=>s.trim()).filter(Boolean);
+    if(!parts.length) return null;
+    return parts[parts.length-1].split(/\s+/)[0];
+  }
+
+  function extractImages(html, baseUrl){
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const title = (doc.querySelector('title')?.textContent || '').trim();
+    const found = new Map(); // url -> true (preserve order)
+
+    const add = u => { if(!u) return; const a=abs(u, baseUrl); if(a && !found.has(a)) found.set(a, true); };
+
+    // <img> and lazy variants
+    doc.querySelectorAll('img').forEach(img => {
+      ['data-src','data-original','data-lazy-src','data-lazy','data-url','data-full','src'].forEach(attr=>{
+        const v=img.getAttribute(attr); if(v && !v.startsWith('data:')) add(v);
+      });
+      const ss = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+      if(ss) add(pickFromSrcset(ss));
+    });
+    // <picture><source>
+    doc.querySelectorAll('source[srcset]').forEach(s => add(pickFromSrcset(s.getAttribute('srcset'))));
+    // links to images
+    doc.querySelectorAll('a[href]').forEach(a => { const h=a.getAttribute('href'); if(h && IMG_EXT.test(h)) add(h); });
+
+    return { urls: [...found.keys()], title };
+  }
+
+  // ---------- rendering ----------
+  function nameFromUrl(u){
+    try{ return decodeURIComponent(u.split(/[?#]/)[0].split('/').pop()) || u; }
+    catch{ return u; }
+  }
+  function updateCount(){
+    const sel = items.filter(i=>i.selected).length;
+    const chapters = new Set(items.map(i=>i.chapter)).size;
+    countEl.textContent = `${sel} selected / ${items.length} images · ${chapters} chapter${chapters===1?'':'s'}`;
+  }
+
+  function render(){
+    gridEl.innerHTML='';
+    let lastChapter=null;
+    items.forEach((it, i) => {
+      if(it.chapter!==lastChapter){
+        lastChapter=it.chapter;
+        const sep=document.createElement('div'); sep.className='chap';
+        sep.innerHTML=`Chapter ${it.chapter} <span class="src">${it.chapterUrl||''}</span>`;
+        gridEl.appendChild(sep);
+      }
+      const card=document.createElement('div');
+      card.className='card'+(it.selected?'':' off');
+      card.draggable=true; card.dataset.i=i;
+
+      const tw=document.createElement('div'); tw.className='thumbwrap';
+      const img=document.createElement('img');
+      img.loading='lazy';
+      img.src=it.url; // try direct first (display only)
+      img.onerror=()=>{ if(!img.dataset.proxied){ img.dataset.proxied='1'; img.src=proxify(it.url); } else { tw.innerHTML='<div class="broken">preview failed<br>(may still download)</div>'; } };
+      img.onload=()=>{ it.naturalW=img.naturalWidth; const d=card.querySelector('.dim'); if(d) d.textContent=img.naturalWidth+'×'+img.naturalHeight; };
+      tw.appendChild(img);
+
+      const idx=document.createElement('span'); idx.className='idx'; idx.textContent=i+1; tw.appendChild(idx);
+      const chk=document.createElement('input'); chk.type='checkbox'; chk.className='chk'; chk.checked=it.selected;
+      chk.onclick=e=>e.stopPropagation();
+      chk.onchange=()=>{ it.selected=chk.checked; card.classList.toggle('off',!it.selected); updateCount(); };
+      tw.appendChild(chk);
+      card.appendChild(tw);
+
+      const meta=document.createElement('div'); meta.className='meta';
+      meta.innerHTML=`<span class="dim">${it.naturalW?(it.naturalW+'px'):'…'}</span> · ${nameFromUrl(it.url)}`;
+      card.appendChild(meta);
+
+      addDnD(card);
+      gridEl.appendChild(card);
+    });
+    updateCount();
+  }
+
+  // ---------- drag & drop reorder ----------
+  let dragFrom=null;
+  function addDnD(card){
+    card.addEventListener('dragstart', e=>{ dragFrom=+card.dataset.i; card.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+    card.addEventListener('dragend', ()=>{ card.classList.remove('dragging'); gridEl.querySelectorAll('.card').forEach(c=>c.classList.remove('drop-before','drop-after')); });
+    card.addEventListener('dragover', e=>{
+      e.preventDefault();
+      const r=card.getBoundingClientRect();
+      const after = (e.clientX - r.left) > r.width/2;
+      card.classList.toggle('drop-after', after);
+      card.classList.toggle('drop-before', !after);
+    });
+    card.addEventListener('dragleave', ()=>card.classList.remove('drop-before','drop-after'));
+    card.addEventListener('drop', e=>{
+      e.preventDefault();
+      let to=+card.dataset.i;
+      const r=card.getBoundingClientRect();
+      const after=(e.clientX - r.left) > r.width/2;
+      if(dragFrom==null || dragFrom===to) return;
+      const [moved]=items.splice(dragFrom,1);
+      if(dragFrom < to) to--;
+      if(after) to++;
+      items.splice(to,0,moved);
+      render();
+    });
+  }
+
+  // ---------- toolbar actions ----------
+  $('selAll').onclick=()=>{ items.forEach(i=>i.selected=true); render(); };
+  $('selNone').onclick=()=>{ items.forEach(i=>i.selected=false); render(); };
+  $('reverse').onclick=()=>{ items.reverse(); render(); };
+  $('sortName').onclick=()=>{ items.sort((a,b)=> a.chapter-b.chapter || nameFromUrl(a.url).localeCompare(nameFromUrl(b.url),undefined,{numeric:true,sensitivity:'base'})); render(); };
+  $('cullSmall').onclick=()=>{ items.forEach(i=>{ if(i.naturalW && i.naturalW<300) i.selected=false; }); render(); };
+
+  // ---------- main fetch flow ----------
+  fetchBtn.onclick=async()=>{
+    const all = urlsEl.value.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!all.length){ urlsEl.focus(); return; }
+    const pages = all.filter(u=>!fetchedPages.has(u)); // only fetch ones we haven't already
+    clearLog();
+    if(!pages.length){ log('All listed URLs were already fetched. Edit the list or press Clear to start over.', 'w'); return; }
+
+    fetchBtn.disabled=true;
+    let added=0, firstTitle='';
+    log(`Fetching ${pages.length} page(s) via ${proxyEl.options[proxyEl.selectedIndex].text}…`);
+    try{
+      for(let p=0; p<pages.length; p++){
+        const u=pages[p];
+        setProgress(fetchProgress,(p+0.5)/pages.length);
+        log(`[${p+1}/${pages.length}] ${u}`);
+        let html;
+        try{
+          const res=await fetchVia(u);
+          html=await res.text();
+        }catch(err){
+          log(`   ✗ fetch failed: ${err.message}`, 'e');
+          if(proxyEl.value==='local') log('     Is the local server running?  →  ./run.sh', 'w');
+          continue;
+        }
+        fetchedPages.add(u);
+        chapterCount++;
+        const {urls:imgs, title}=extractImages(html, u);
+        if(!firstTitle && title) firstTitle=title;
+        let chapAdded=0;
+        imgs.forEach(iu=>{
+          if(seenImages.has(iu)) return;
+          seenImages.add(iu);
+          items.push({url:iu, selected:true, naturalW:0, chapter:chapterCount, chapterUrl:u});
+          chapAdded++; added++;
+        });
+        if(chapAdded) log(`   ✓ ${chapAdded} image(s) (chapter ${chapterCount})`, 'ok');
+        else log('   no new images found on this page', 'w');
+      }
+
+      if(!fnameEl.value && (firstTitle || items.length)){
+        const seed = firstTitle || nameFromUrl(pages[0]) || 'comic';
+        const base = seed.replace(/\.[a-z0-9]+$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim().slice(0,80);
+        fnameEl.value = base || 'comic';
+      }
+      if(items.length){ resultsPanel.style.display='block'; render(); }
+      log(`Done — added ${added} image(s); ${items.length} total across ${chapterCount} chapter(s).`, added?'ok':'w');
+      if(!added && !items.length) log('No images found. Try another proxy, or add image URLs manually below.', 'w');
+    }finally{
+      fetchBtn.disabled=false; setProgress(fetchProgress,null);
+    }
+  };
+
+  clearBtn.onclick=()=>{
+    items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0; directMode=null;
+    gridEl.innerHTML=''; resultsPanel.style.display='none'; clearLog();
+    fnameEl.value='';
+  };
+
+  addManualBtn.onclick=()=>{
+    const lines=manualUrls.value.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!lines.length) return;
+    let added=0;
+    const chap = ++chapterCount; // manual additions form their own group
+    lines.forEach(u=>{ if(!seenImages.has(u)){ seenImages.add(u); items.push({url:u,selected:true,naturalW:0,chapter:chap,chapterUrl:'(added manually)'}); added++; } });
+    if(!added){ chapterCount--; } // nothing new; don't leave an empty chapter number
+    manualUrls.value='';
+    resultsPanel.style.display='block';
+    render();
+    log(added+' image URL(s) added.', added?'ok':'w');
+  };
+
+  // Ctrl/Cmd+Enter in the URL box triggers a fetch (plain Enter inserts a newline).
+  urlsEl.addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); fetchBtn.click(); } });
+
+  // ---------- concurrency ----------
+  async function mapLimit(arr, limit, fn){
+    const out=new Array(arr.length); let i=0;
+    const workers=Array.from({length:Math.min(limit,arr.length)}, async()=>{
+      while(i<arr.length){ const idx=i++; out[idx]=await fn(arr[idx], idx); }
+    });
+    await Promise.all(workers);
+    return out;
+  }
+
+  // ---------- CRC32 + ZIP (STORED) ----------
+  const CRC_TABLE=(()=>{ const t=new Uint32Array(256);
+    for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xedb88320^(c>>>1):c>>>1; t[n]=c>>>0; } return t; })();
+  function crc32(bytes){ let c=0xffffffff; for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xff]^(c>>>8); return (c^0xffffffff)>>>0; }
+
+  function buildZip(files, mimetype){ // files:[{name,data:Uint8Array}]  (all entries STORED)
+    const enc=new TextEncoder(); const chunks=[]; const central=[]; let offset=0;
+    const now=new Date();
+    const dosTime=(now.getHours()<<11)|(now.getMinutes()<<5)|(now.getSeconds()>>1);
+    const dosDate=((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
+    for(const f of files){
+      const nameBytes=enc.encode(f.name); const crc=crc32(f.data); const size=f.data.length;
+      const lh=new DataView(new ArrayBuffer(30));
+      lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0,true);
+      lh.setUint16(8,0,true); lh.setUint16(10,dosTime,true); lh.setUint16(12,dosDate,true);
+      lh.setUint32(14,crc,true); lh.setUint32(18,size,true); lh.setUint32(22,size,true);
+      lh.setUint16(26,nameBytes.length,true); lh.setUint16(28,0,true);
+      chunks.push(new Uint8Array(lh.buffer), nameBytes, f.data);
+      const ch=new DataView(new ArrayBuffer(46));
+      ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true);
+      ch.setUint16(8,0,true); ch.setUint16(10,0,true); ch.setUint16(12,dosTime,true); ch.setUint16(14,dosDate,true);
+      ch.setUint32(16,crc,true); ch.setUint32(20,size,true); ch.setUint32(24,size,true);
+      ch.setUint16(28,nameBytes.length,true); ch.setUint16(30,0,true); ch.setUint16(32,0,true);
+      ch.setUint16(34,0,true); ch.setUint16(36,0,true); ch.setUint32(38,0,true); ch.setUint32(42,offset,true);
+      central.push({header:new Uint8Array(ch.buffer), name:nameBytes});
+      offset+=30+nameBytes.length+size;
+    }
+    const centralStart=offset; let centralSize=0;
+    for(const c of central){ chunks.push(c.header,c.name); centralSize+=c.header.length+c.name.length; }
+    const eo=new DataView(new ArrayBuffer(22));
+    eo.setUint32(0,0x06054b50,true); eo.setUint16(4,0,true); eo.setUint16(6,0,true);
+    eo.setUint16(8,files.length,true); eo.setUint16(10,files.length,true);
+    eo.setUint32(12,centralSize,true); eo.setUint32(16,centralStart,true); eo.setUint16(20,0,true);
+    chunks.push(new Uint8Array(eo.buffer));
+    return new Blob(chunks,{type:mimetype||'application/vnd.comicbook+zip'});
+  }
+
+  // ---------- EPUB (fixed-layout, one image per page) ----------
+  function xmlEsc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
+  function mimeFor(ext){
+    return {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',svg:'image/svg+xml'}[(ext||'').toLowerCase()]||'image/jpeg';
+  }
+  function uuidv4(){
+    const b=crypto.getRandomValues(new Uint8Array(16));
+    b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+    const h=[...b].map(x=>x.toString(16).padStart(2,'0')).join('');
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+  }
+  async function imageSize(blob){
+    try{
+      if('createImageBitmap' in window){
+        const bmp=await createImageBitmap(blob);
+        const s={w:bmp.width,h:bmp.height}; if(bmp.close) bmp.close(); return s;
+      }
+    }catch(e){}
+    return await new Promise(res=>{
+      const url=URL.createObjectURL(blob), im=new Image();
+      im.onload=()=>{ res({w:im.naturalWidth,h:im.naturalHeight}); URL.revokeObjectURL(url); };
+      im.onerror=()=>{ res({w:0,h:0}); URL.revokeObjectURL(url); };
+      im.src=url;
+    });
+  }
+
+  function buildEpub(pages, meta){ // pages:[{data,ext,w,h}]  meta:{title,author,rtl}
+    const enc=new TextEncoder();
+    const id='urn:uuid:'+uuidv4();
+    const modified=new Date().toISOString().replace(/\.\d+Z$/,'Z');
+    const title=xmlEsc(meta.title||'Comic'), author=xmlEsc(meta.author||'Unknown');
+    const padLen=Math.max(3,String(pages.length).length);
+    const num=i=>String(i+1).padStart(padLen,'0');
+    const files=[];
+
+    // mimetype MUST be the first entry and STORED — our zip writer stores everything.
+    files.push({name:'mimetype', data:enc.encode('application/epub+zip')});
+    files.push({name:'META-INF/container.xml', data:enc.encode(
+`<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`)});
+
+    let manifest='', spine='';
+    pages.forEach((p,i)=>{
+      const n=num(i);
+      manifest+=`    <item id="page-${n}" href="page-${n}.xhtml" media-type="application/xhtml+xml"/>\n`;
+      manifest+=`    <item id="img-${n}" href="images/img-${n}.${p.ext}" media-type="${mimeFor(p.ext)}"${i===0?' properties="cover-image"':''}/>\n`;
+      spine+=`    <itemref idref="page-${n}"/>\n`;
+    });
+
+    files.push({name:'OEBPS/content.opf', data:enc.encode(
+`<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">${id}</dc:identifier>
+    <dc:title>${title}</dc:title>
+    <dc:creator>${author}</dc:creator>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">${modified}</meta>
+    <meta property="rendition:layout">pre-paginated</meta>
+    <meta property="rendition:orientation">auto</meta>
+    <meta property="rendition:spread">auto</meta>
+    <meta name="cover" content="img-${num(0)}"/>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+${manifest}  </manifest>
+  <spine toc="ncx"${meta.rtl?' page-progression-direction="rtl"':''}>
+${spine}  </spine>
+</package>`)});
+
+    files.push({name:'OEBPS/nav.xhtml', data:enc.encode(
+`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
+<head><meta charset="utf-8"/><title>${title}</title></head>
+<body>
+  <nav epub:type="toc" id="toc"><h1>${title}</h1>
+    <ol><li><a href="page-${num(0)}.xhtml">Start</a></li></ol>
+  </nav>
+  <nav epub:type="landmarks" hidden="hidden">
+    <ol><li><a epub:type="bodymatter" href="page-${num(0)}.xhtml">Start</a></li></ol>
+  </nav>
+</body>
+</html>`)});
+
+    files.push({name:'OEBPS/toc.ncx', data:enc.encode(
+`<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="${id}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle><text>${title}</text></docTitle>
+  <navMap>
+    <navPoint id="np-1" playOrder="1"><navLabel><text>Start</text></navLabel><content src="page-${num(0)}.xhtml"/></navPoint>
+  </navMap>
+</ncx>`)});
+
+    pages.forEach((p,i)=>{
+      const n=num(i), w=p.w||800, h=p.h||1200;
+      files.push({name:`OEBPS/page-${n}.xhtml`, data:enc.encode(
+`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <meta charset="utf-8"/>
+  <title>Page ${i+1}</title>
+  <meta name="viewport" content="width=${w}, height=${h}"/>
+  <style>html,body{margin:0;padding:0}body{width:${w}px;height:${h}px}img{width:100%;height:100%;display:block}</style>
+</head>
+<body><img src="images/img-${n}.${p.ext}" alt="Page ${i+1}"/></body>
+</html>`)});
+      files.push({name:`OEBPS/images/img-${n}.${p.ext}`, data:p.data});
+    });
+
+    return buildZip(files, 'application/epub+zip');
+  }
+
+  function extFromTypeOrUrl(type, url){
+    const t=(type||'').toLowerCase();
+    if(t.includes('jpeg')||t.includes('jpg')) return 'jpg';
+    if(t.includes('png')) return 'png';
+    if(t.includes('webp')) return 'webp';
+    if(t.includes('gif')) return 'gif';
+    if(t.includes('avif')) return 'avif';
+    if(t.includes('bmp')) return 'bmp';
+    const m=url.split(/[?#]/)[0].match(/\.([a-z0-9]+)$/i);
+    return m?m[1].toLowerCase():'jpg';
+  }
+  const pad=(n,len)=>String(n).padStart(len,'0');
+
+  // ---------- build CBZ ----------
+  buildBtn.onclick=async()=>{
+    const sel=items.filter(i=>i.selected);
+    if(!sel.length){ buildStatus.textContent='Select at least one image.'; return; }
+    buildBtn.disabled=true; fetchBtn.disabled=true;
+    setProgress(buildProgress,0); buildStatus.textContent='Downloading images…';
+    const padLen=String(sel.length).length<3?3:String(sel.length).length;
+    let done=0; const failed=[];
+
+    let fetched=0, viaDirect=0, viaProxy=0;
+    const results=await mapLimit(sel, 4, async(it, idx)=>{
+      try{
+        if(!it.data){ // cache bytes so re-builds don't re-download
+          const how=await fetchImageBytes(it);
+          fetched++; if(how==='direct') viaDirect++; else viaProxy++;
+        }
+        return {order:idx, data:it.data, ext:it.ext};
+      }catch(err){
+        failed.push({url:it.url, err:err.message});
+        return null;
+      }finally{
+        done++; setProgress(buildProgress, done/sel.length);
+        buildStatus.textContent=`Preparing… ${done}/${sel.length}`;
+      }
+    });
+    if(fetched) log(`Fetched ${fetched} image(s): ${viaDirect} direct, ${viaProxy} via proxy.`, 'ok');
+
+    const ok=results.filter(Boolean).sort((a,b)=>a.order-b.order);
+    if(failed.length) log(failed.length+' image(s) failed to download:', 'w'), failed.forEach(f=>log('  ✗ '+f.url+' ('+f.err+')','e'));
+    if(!ok.length){ buildStatus.textContent='All downloads failed — try another proxy.'; buildBtn.disabled=false; fetchBtn.disabled=false; setProgress(buildProgress,null); return; }
+
+    const fmt = formatEl.value;
+    const cleanName=(fnameEl.value.trim()||'comic').replace(/\.(cbz|epub)$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim() || 'comic';
+    let blob, ext, pageCount;
+    try{
+      if(fmt==='epub'){
+        buildStatus.textContent='Reading image sizes…';
+        const pages=await mapLimit(ok, 4, async r=>{
+          const sz=await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
+          return {data:r.data, ext:r.ext, w:sz.w, h:sz.h};
+        });
+        buildStatus.textContent='Packaging EPUB…';
+        blob=buildEpub(pages, {title:(fnameEl.value.trim()||'Comic'), author:authorEl.value.trim(), rtl:rtlEl.checked});
+        ext='epub'; pageCount=pages.length;
+      }else if(fmt==='kcc'){
+        // Build the CBZ in-browser, then let the server run KCC on it.
+        buildStatus.textContent='Packaging CBZ…';
+        const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
+        const cbz=buildZip(files); pageCount=files.length;
+        buildStatus.textContent='Optimizing with KCC on the server… first run builds KCC (~1 min), then it’s cached.';
+        log('Sending CBZ to server → KCC (profile KoLC, EPUB, --nokepub -u)…');
+        const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())+'&manga='+(rtlEl.checked?1:0);
+        let res;
+        try{
+          res=await fetch(SERVER_BASE+'/kcc?'+qs, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:cbz});
+        }catch(e){ throw new Error('Could not reach the KCC server — start it with ./run.sh and open the page it serves. ('+e.message+')'); }
+        if(!res.ok){ throw new Error('Server KCC step failed:\n'+((await res.text().catch(()=>''))||('HTTP '+res.status))); }
+        blob=await res.blob(); ext='epub';
+      }else{
+        buildStatus.textContent='Packaging CBZ…';
+        const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
+        blob=buildZip(files); ext='cbz'; pageCount=files.length;
+      }
+    }catch(err){
+      setProgress(buildProgress,null);
+      buildStatus.innerHTML=`<span class="pill" style="color:var(--bad)">error</span> ${err.message.replace(/\n/g,'<br>')}`;
+      log(err.message, 'e');
+      buildBtn.disabled=false; fetchBtn.disabled=false;
+      return;
+    }
+    const totalMB=(blob.size/1048576).toFixed(1);
+
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob); a.download=`${cleanName}.${ext}`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
+
+    setProgress(buildProgress,null);
+    const reused=pageCount-fetched;
+    const kccNote = fmt==='kcc' ? ' · KCC-optimized (KoLC)' : '';
+    buildStatus.innerHTML=`<span class="pill">done</span> Created <b>${cleanName}.${ext}</b> — ${pageCount} pages, ${totalMB} MB${kccNote}.${reused>0?` (${reused} reused from cache)`:''}${failed.length?` · ${failed.length} skipped`:''}`;
+    log(`${fmt==='kcc'?'Kindle EPUB (KCC)':ext.toUpperCase()} created: ${pageCount} pages, ${totalMB} MB.`, 'ok');
+    buildBtn.disabled=false; fetchBtn.disabled=false;
+  };
+
+})();
+</script>
+</body>
+</html>

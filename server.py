@@ -171,9 +171,11 @@ class Handler(BaseHTTPRequestHandler):
             with open(infile, "wb") as f:
                 f.write(data)
 
+            # No --nokepub -> KCC emits a Kobo .kepub.epub. --forcecolor keeps color
+            # (KCC converts to grayscale by default) for the color e-ink screen.
             cmd = ["uvx", "--python", KCC_PY,
                    "--from", "git+https://github.com/ciromattia/kcc@%s" % KCC_REF,
-                   "kcc-c2e", "-p", KCC_PROFILE, "-f", KCC_FORMAT, "--nokepub", "-u",
+                   "kcc-c2e", "-p", KCC_PROFILE, "-f", KCC_FORMAT, "--forcecolor", "-u",
                    "-t", name, "-o", outdir]
             if author:
                 cmd += ["-a", author]
@@ -188,14 +190,19 @@ class Handler(BaseHTTPRequestHandler):
                 tail = (proc.stderr or proc.stdout or "").strip()[-1500:]
                 return self._text(500, "KCC exited %d:\n%s" % (proc.returncode, tail))
 
-            outs = glob.glob(os.path.join(outdir, "*.epub")) or glob.glob(os.path.join(outdir, "*"))
+            outs = (glob.glob(os.path.join(outdir, "*.kepub.epub"))
+                    or glob.glob(os.path.join(outdir, "*.epub"))
+                    or glob.glob(os.path.join(outdir, "*")))
             if not outs:
                 return self._text(500, "KCC produced no output.\n" + (proc.stdout or "")[-1000:])
-            with open(outs[0], "rb") as f:
+            produced = outs[0]
+            with open(produced, "rb") as f:
                 epub = f.read()
 
+            # Kobo only treats the file as a kepub if the name ends in .kepub.epub.
+            dl_ext = ".kepub.epub" if produced.endswith(".kepub.epub") else (os.path.splitext(produced)[1] or ".epub")
             self._send(200, epub, "application/epub+zip",
-                       {"Content-Disposition": 'attachment; filename="%s.epub"' % name})
+                       {"Content-Disposition": 'attachment; filename="%s%s"' % (name, dl_ext)})
         except subprocess.TimeoutExpired:
             return self._text(504, "KCC timed out.")
         except Exception as e:

@@ -31,7 +31,7 @@ server with `Ctrl+C`. Use a different port with `PORT=9000 ./run.sh`.
 
 | Format | What you get |
 | --- | --- |
-| **E-reader EPUB — KCC optimized (KoLC)** | CBZ built in-browser, then run through KCC on the server: downscaled to the device screen, grayscale, gamma-corrected. Best for an e-ink reader. |
+| **E-reader EPUB — KCC optimized (KoLC)** | CBZ built in-browser, then run through KCC on the server: downscaled to the device screen, color preserved, gamma-corrected, output as a Kobo `.kepub.epub`. Best for an e-ink reader. |
 | **EPUB (fixed layout)** | Self-contained fixed-layout EPUB 3 built entirely in-browser (no server needed). One image per page, sized to each image. |
 | **CBZ** | Plain comic archive (zipped images), built in-browser. |
 
@@ -64,11 +64,13 @@ needs for extraction is on PATH, then opens the browser.
 The e-reader option converts with these:
 
 ```
-kcc-c2e -p KoLC -f EPUB --nokepub -u [-m] [-a AUTHOR] -t TITLE
+kcc-c2e -p KoLC -f EPUB --forcecolor -u [-m] [-a AUTHOR] -t TITLE
 ```
 
-- `KoLC` — Kobo Libra Colour profile. `--nokepub` keeps a plain `.epub`
-  (not the Kobo `.kepub.epub`). `-u` upscales small pages; `-m` is manga/RTL.
+- `KoLC` — Kobo Libra Colour profile. `--forcecolor` keeps color (KCC defaults
+  to grayscale). Without `--nokepub`, KCC names the output `.kepub.epub` so Kobo
+  loads it through its native kepub renderer (better fixed-layout/image handling
+  than the generic EPUB path). `-u` upscales small pages; `-m` is manga/RTL.
 
 Override via environment variables when launching:
 

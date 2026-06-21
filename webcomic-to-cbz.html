@@ -726,14 +726,14 @@ ${spine}  </spine>
         const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
         const cbz=buildZip(files); pageCount=files.length;
         buildStatus.textContent='Optimizing with KCC on the server… first run builds KCC (~1 min), then it’s cached.';
-        log('Sending CBZ to server → KCC (profile KoLC, EPUB, --nokepub -u)…');
+        log('Sending CBZ to server → KCC (profile KoLC, kepub, --forcecolor -u)…');
         const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())+'&manga='+(rtlEl.checked?1:0);
         let res;
         try{
           res=await fetch(SERVER_BASE+'/kcc?'+qs, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:cbz});
         }catch(e){ throw new Error('Could not reach the KCC server — start it with ./run.sh and open the page it serves. ('+e.message+')'); }
         if(!res.ok){ throw new Error('Server KCC step failed:\n'+((await res.text().catch(()=>''))||('HTTP '+res.status))); }
-        blob=await res.blob(); ext='epub';
+        blob=await res.blob(); ext='kepub.epub'; // Kobo needs the .kepub.epub extension
       }else{
         buildStatus.textContent='Packaging CBZ…';
         const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
@@ -755,9 +755,9 @@ ${spine}  </spine>
 
     setProgress(buildProgress,null);
     const reused=pageCount-fetched;
-    const kccNote = fmt==='kcc' ? ' · KCC-optimized (KoLC)' : '';
+    const kccNote = fmt==='kcc' ? ' · KCC color-optimized (KoLC kepub)' : '';
     buildStatus.innerHTML=`<span class="pill">done</span> Created <b>${cleanName}.${ext}</b> — ${pageCount} pages, ${totalMB} MB${kccNote}.${reused>0?` (${reused} reused from cache)`:''}${failed.length?` · ${failed.length} skipped`:''}`;
-    log(`${fmt==='kcc'?'Kindle EPUB (KCC)':ext.toUpperCase()} created: ${pageCount} pages, ${totalMB} MB.`, 'ok');
+    log(`${fmt==='kcc'?'Kobo kepub (KCC)':ext.toUpperCase()} created: ${pageCount} pages, ${totalMB} MB.`, 'ok');
     buildBtn.disabled=false; fetchBtn.disabled=false;
   };
 

@@ -163,6 +163,9 @@
     <label id="rtlRow" style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--text); cursor:pointer">
       <input type="checkbox" id="rtl" style="width:auto"> Right-to-left reading order (manga)
     </label>
+    <label id="webtoonRow" style="display:none; align-items:center; gap:8px; margin-top:8px; font-size:13px; color:var(--text); cursor:pointer">
+      <input type="checkbox" id="webtoon" style="width:auto"> Webtoon mode — split tall continuous strips into device-height pages (manhwa)
+    </label>
     <div class="progress" id="buildProgress"><div></div></div>
     <div id="buildStatus" class="hint"></div>
   </div>
@@ -181,6 +184,7 @@
   const fnameEl=$('fname'), buildBtn=$('buildBtn'), buildStatus=$('buildStatus');
   const manualUrls=$('manualUrls'), addManualBtn=$('addManualBtn');
   const authorEl=$('author'), formatEl=$('format'), rtlEl=$('rtl'), rtlRow=$('rtlRow');
+  const webtoonEl=$('webtoon'), webtoonRow=$('webtoonRow');
 
   // ---------- state ----------
   let items = [];                 // {url, selected, naturalW, data, ext, chapter, chapterUrl}
@@ -224,7 +228,17 @@
     const f = formatEl.value;
     buildBtn.textContent = f==='kcc' ? 'Create Kindle EPUB' : (f==='epub' ? 'Create EPUB' : 'Create CBZ');
     rtlRow.style.display = (f==='epub' || f==='kcc') ? 'flex' : 'none'; // manga (RTL) applies to both
+    webtoonRow.style.display = (f==='kcc') ? 'flex' : 'none';           // webtoon splitting is KCC-only
+    syncReadingMode();
   }
+  // Webtoon (vertical scroll) has no left/right direction, so RTL is irrelevant there.
+  function syncReadingMode(){
+    const wt = webtoonEl.checked && webtoonRow.style.display !== 'none';
+    rtlEl.disabled = wt;
+    rtlRow.style.opacity = wt ? '.4' : '';
+    rtlRow.style.cursor = wt ? 'default' : 'pointer';
+  }
+  webtoonEl.addEventListener('change', syncReadingMode);
   formatEl.addEventListener('change', () => { localStorage.setItem('cbz_format', formatEl.value); syncFormatUI(); });
   syncFormatUI();
 
@@ -725,9 +739,11 @@ ${spine}  </spine>
         buildStatus.textContent='Packaging CBZ…';
         const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
         const cbz=buildZip(files); pageCount=files.length;
+        const wt = webtoonEl.checked;
         buildStatus.textContent='Optimizing with KCC on the server… first run builds KCC (~1 min), then it’s cached.';
-        log('Sending CBZ to server → KCC (profile KoLC, kepub, --forcecolor -u)…');
-        const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())+'&manga='+(rtlEl.checked?1:0);
+        log('Sending CBZ to server → KCC (profile KoLC, kepub, --forcecolor -u'+(wt?' -w':'')+(!wt&&rtlEl.checked?' -m':'')+')…');
+        const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())
+                 +'&manga='+((!wt&&rtlEl.checked)?1:0)+'&webtoon='+(wt?1:0);
         let res;
         try{
           res=await fetch(SERVER_BASE+'/kcc?'+qs, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:cbz});

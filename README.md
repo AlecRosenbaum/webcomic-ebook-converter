@@ -35,7 +35,10 @@ server with `Ctrl+C`. Use a different port with `PORT=9000 ./run.sh`.
 | **EPUB (fixed layout)** | Self-contained fixed-layout EPUB 3 built entirely in-browser (no server needed). One image per page, sized to each image. |
 | **CBZ** | Plain comic archive (zipped images), built in-browser. |
 
-The **Right-to-left (manga)** checkbox applies to the EPUB and KCC options.
+The **Right-to-left (manga)** checkbox applies to the EPUB and KCC options. The
+**Webtoon mode** checkbox (KCC only) splits tall continuous strips into
+device-height pages for vertical-scroll manhwa; it supersedes RTL (a vertical
+webtoon has no left/right direction), so the two are mutually exclusive.
 
 The KCC option needs the server running (it shows **● server connected · KCC
 ready** in the header). The first KCC conversion builds KCC and its
@@ -64,13 +67,14 @@ needs for extraction is on PATH, then opens the browser.
 The e-reader option converts with these:
 
 ```
-kcc-c2e -p KoLC -f EPUB --forcecolor -u [-m] [-a AUTHOR] -t TITLE
+kcc-c2e -p KoLC -f EPUB --forcecolor -u [-m | -w] [-a AUTHOR] -t TITLE
 ```
 
 - `KoLC` — Kobo Libra Colour profile. `--forcecolor` keeps color (KCC defaults
   to grayscale). Without `--nokepub`, KCC names the output `.kepub.epub` so Kobo
   loads it through its native kepub renderer (better fixed-layout/image handling
-  than the generic EPUB path). `-u` upscales small pages; `-m` is manga/RTL.
+  than the generic EPUB path). `-u` upscales small pages; `-m` is manga/RTL;
+  `-w` is webtoon mode (splits tall strips into device-height pages).
 
 Override via environment variables when launching:
 

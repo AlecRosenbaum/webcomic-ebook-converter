@@ -158,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
         name = safe_name((q.get("name") or ["comic"])[0])
         author = ((q.get("author") or [""])[0]).strip()
         manga = (q.get("manga") or ["0"])[0] in ("1", "true", "yes")
+        webtoon = (q.get("webtoon") or ["0"])[0] in ("1", "true", "yes")
 
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -179,8 +180,10 @@ class Handler(BaseHTTPRequestHandler):
                    "-t", name, "-o", outdir]
             if author:
                 cmd += ["-a", author]
-            if manga:
-                cmd.append("-m")
+            if webtoon:
+                cmd.append("-w")   # split tall continuous strips into device-height pages
+            elif manga:
+                cmd.append("-m")   # RTL doesn't apply to a vertical webtoon, so these are exclusive
             cmd.append(infile)
 
             self.log_message("running KCC: %s", " ".join(cmd))

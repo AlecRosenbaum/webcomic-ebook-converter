@@ -721,6 +721,41 @@ ${spine}  </spine>
   }
   const pad=(n,len)=>String(n).padStart(len,'0');
 
+  // Read image dimensions straight from the header bytes (no full decode) for the
+  // common formats. Much faster than createImageBitmap when grouping a webtoon of
+  // many/large WebP/JPEG strips. Returns {w,h} or null (caller falls back to decode).
+  function dimsFromBytes(u8){
+    try{
+      const n=u8.length, dv=new DataView(u8.buffer, u8.byteOffset, n);
+      if(n>24 && u8[0]===0x89&&u8[1]===0x50&&u8[2]===0x4E&&u8[3]===0x47)      // PNG
+        return {w:dv.getUint32(16), h:dv.getUint32(20)};
+      if(n>10 && u8[0]===0x47&&u8[1]===0x49&&u8[2]===0x46)                    // GIF
+        return {w:dv.getUint16(6,true), h:dv.getUint16(8,true)};
+      if(n>30 && u8[0]===0x52&&u8[1]===0x49&&u8[2]===0x46&&u8[3]===0x46 &&    // WebP (RIFF..WEBP)
+         u8[8]===0x57&&u8[9]===0x45&&u8[10]===0x42&&u8[11]===0x50){
+        const cc=String.fromCharCode(u8[12],u8[13],u8[14],u8[15]);
+        if(cc==='VP8 ') return {w:dv.getUint16(26,true)&0x3fff, h:dv.getUint16(28,true)&0x3fff};
+        if(cc==='VP8L'){ const b0=u8[21],b1=u8[22],b2=u8[23],b3=u8[24];
+          return {w:1+((( b1&0x3f)<<8)|b0), h:1+(((b3&0x0f)<<10)|(b2<<2)|((b1&0xc0)>>6))}; }
+        if(cc==='VP8X') return {w:1+(u8[24]|u8[25]<<8|u8[26]<<16), h:1+(u8[27]|u8[28]<<8|u8[29]<<16)};
+      }
+      if(n>4 && u8[0]===0xFF&&u8[1]===0xD8){                                  // JPEG: scan SOF markers
+        let o=2;
+        while(o+9<n){
+          if(u8[o]!==0xFF){ o++; continue; }
+          const m=u8[o+1];
+          if(m===0xFF){ o++; continue; }
+          if((m>=0xD0&&m<=0xD9)){ o+=2; continue; }          // standalone markers (incl. SOI/EOI/RST)
+          const len=dv.getUint16(o+2);
+          if(m>=0xC0&&m<=0xCF && m!==0xC4&&m!==0xC8&&m!==0xCC) // SOF0..SOF15 (real frame headers)
+            return {h:dv.getUint16(o+5), w:dv.getUint16(o+7)};
+          o+=2+len;
+        }
+      }
+    }catch(e){}
+    return null;
+  }
+
   // KCC's webtoon merge (comic2panel) concatenates every image IN A DIRECTORY into one
   // strip and hard-errors if that strip exceeds 524288px tall. So for webtoon mode we
   // group images into numbered subfolders, keeping each folder's cumulative source
@@ -730,8 +765,12 @@ ${spine}  </spine>
   async function buildWebtoonCbz(ok){
     buildStatus.textContent='Reading image sizes…';
     const measured = await mapLimit(ok, 4, async r => {
-      const sz = await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
-      return {data:r.data, ext:r.ext, chapter:r.chapter, h:(sz.h||0)};
+      let d = dimsFromBytes(r.data);                 // fast header read, no decode
+      if(!d || !d.h){                                 // fall back to a full decode
+        const sz = await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
+        d = {h:sz.h};
+      }
+      return {data:r.data, ext:r.ext, chapter:r.chapter, h:(d.h||0)};
     });
     const files=[]; let folder=0, cum=0, inFolder=0, lastChapter=null, oversized=0;
     measured.forEach((m,i)=>{

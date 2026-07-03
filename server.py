@@ -98,6 +98,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Expose-Headers", "Retry-After")
         self.send_header("Access-Control-Allow-Private-Network", "true")
 
+    def _read_body(self):
+        """Fully consume the request body (Content-Length or chunked). Leaving any
+        of it unread on a keep-alive connection makes the server parse the leftover
+        as the next request (the 'Bad HTTP request' / PK.. garbage failure)."""
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            chunks = []
+            while True:
+                line = self.rfile.readline(65537).split(b";", 1)[0].strip()
+                try:
+                    size = int(line, 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    while True:                       # consume trailers up to blank line
+                        t = self.rfile.readline(65537)
+                        if t in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                chunks.append(self.rfile.read(size))
+                self.rfile.read(2)                    # trailing CRLF after each chunk
+            return b"".join(chunks)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(length) if length > 0 else b""
+
     def _send(self, status, body, ctype, extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
@@ -106,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
+        if getattr(self, "close_connection", False):
+            self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
@@ -137,6 +164,14 @@ class Handler(BaseHTTPRequestHandler):
         return self._text(404, "Not found")
 
     def do_POST(self):
+        # Always consume the body up front (before any early return) and don't reuse
+        # the connection for a POST — a KCC upload is a one-shot heavy request, and
+        # this makes a leftover-body / keep-alive desync impossible.
+        self.close_connection = True
+        try:
+            self._post_body = self._read_body()
+        except Exception:
+            self._post_body = b""
         if urlparse(self.path).path == "/kcc":
             return self._kcc()
         return self._text(404, "Not found")
@@ -207,10 +242,9 @@ class Handler(BaseHTTPRequestHandler):
         manga = (q.get("manga") or ["0"])[0] in ("1", "true", "yes")
         webtoon = (q.get("webtoon") or ["0"])[0] in ("1", "true", "yes")
 
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0:
+        data = getattr(self, "_post_body", b"")
+        if not data:
             return self._text(400, "Empty upload (expected a CBZ body).")
-        data = self.rfile.read(length)
 
         tmp = tempfile.mkdtemp(prefix="kcc_")
         try:

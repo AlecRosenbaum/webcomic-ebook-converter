@@ -279,25 +279,56 @@
   }
 
   // ---------- fetch helpers ----------
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const RETRY_STATUS = new Set([429, 503]); // rate limited / temporarily unavailable
+  const MAX_RETRIES = 4;
+  // How long to wait before a retry: honor Retry-After (delta-seconds or HTTP-date)
+  // when the header is readable, otherwise exponential backoff. Capped at 30s.
+  function retryAfterMs(res, attempt){
+    const ra = res.headers.get('Retry-After');
+    if(ra){
+      const secs = Number(ra);
+      if(Number.isFinite(secs)) return Math.min(secs*1000, 30000);
+      const when = Date.parse(ra);
+      if(!Number.isNaN(when)) return Math.max(0, Math.min(when - Date.now(), 30000));
+    }
+    return Math.min(1000 * 2 ** (attempt-1), 15000);
+  }
+  // fetch that backs off and retries on 429/503, respecting Retry-After.
+  // Returns an ok Response, or throws (Error.status set for real HTTP errors).
+  async function fetchRetry(url, opts, label){
+    for(let attempt=1;;attempt++){
+      const res = await fetch(url, opts);
+      if(res.ok) return res;
+      if(RETRY_STATUS.has(res.status) && attempt<=MAX_RETRIES){
+        const ms = retryAfterMs(res, attempt);
+        log(`   ${label||'fetch'}: HTTP ${res.status} rate limited — waiting ${(ms/1000).toFixed(ms<1000?1:0)}s (retry ${attempt}/${MAX_RETRIES})`, 'w');
+        await sleep(ms);
+        continue;
+      }
+      const err = new Error('HTTP '+res.status); err.status = res.status; throw err;
+    }
+  }
+
   async function fetchVia(u){
-    const res = await fetch(proxify(u), {redirect:'follow'});
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    return res;
+    return fetchRetry(proxify(u), {redirect:'follow'}, 'proxy');
   }
 
   // Fetch image bytes: try the CDN directly (no proxy) first, fall back to the
   // proxy if CORS blocks it. After the first direct attempt we remember whether
-  // direct works for this site so we don't spam doomed requests.
+  // direct works for this site so we don't spam doomed requests. Both paths back
+  // off on 429/503 via fetchRetry.
   async function fetchImageBytes(it){
     let res=null, how='direct';
     if(directMode!==false){
       try{
-        const r=await fetch(it.url, {redirect:'follow'});
-        if(!r.ok) throw Object.assign(new Error('HTTP '+r.status), {http:true});
-        res=r; if(directMode===null) directMode=true;
+        res=await fetchRetry(it.url, {redirect:'follow'}, 'direct');
+        if(directMode===null) directMode=true;
       }catch(e){
-        // network/CORS failure (not a real HTTP status) => direct won't work here
-        if(!e.http && directMode===null) directMode=false;
+        // A real HTTP status means direct reached the server (CORS ok) — just a bad
+        // response, so keep using direct. A network/CORS failure (no .status) means
+        // direct is blocked here; switch to the proxy for the rest of this run.
+        if(e.status===undefined && directMode===null) directMode=false;
         res=null;
       }
     }

@@ -32,8 +32,11 @@ import subprocess
 import tempfile
 import glob
 import json
+import time
+import datetime
 import urllib.request
 import urllib.error
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -46,12 +49,36 @@ KCC_FORMAT  = os.environ.get("KCC_FORMAT", "EPUB")
 KCC_REF     = os.environ.get("KCC_REF", "1e57da08a9560a10bcbd8bba6c7d2f7e898b59d2")
 KCC_PY      = os.environ.get("KCC_PY", "3.12")
 
+# Rate-limit (HTTP 429 / 503) handling for the proxy.
+MAX_RETRIES     = int(os.environ.get("MAX_RETRIES", "4"))
+MAX_RETRY_WAIT  = float(os.environ.get("MAX_RETRY_WAIT", "30"))  # cap any single wait, seconds
+
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
 def have(cmd):
     return shutil.which(cmd) is not None
+
+
+def retry_after_seconds(headers):
+    """Parse a Retry-After header (delta-seconds or HTTP-date) into seconds, or None."""
+    if not headers:
+        return None
+    ra = headers.get("Retry-After")
+    if not ra:
+        return None
+    ra = ra.strip()
+    if ra.isdigit():
+        return float(ra)
+    try:
+        dt = parsedate_to_datetime(ra)
+        if dt is None:
+            return None
+        now = datetime.datetime.now(dt.tzinfo) if dt.tzinfo else datetime.datetime.now()
+        return max(0.0, (dt - now).total_seconds())
+    except Exception:
+        return None
 
 
 def safe_name(s, default="comic"):
@@ -68,6 +95,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Expose-Headers", "Retry-After")
         self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def _send(self, status, body, ctype, extra=None):
@@ -132,20 +160,39 @@ class Handler(BaseHTTPRequestHandler):
         req = urllib.request.Request(target, headers={
             "User-Agent": UA, "Accept": "*/*", "Referer": origin + "/",
         })
-        try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                body, headers, status = resp.read(), resp.headers, resp.status
-        except urllib.error.HTTPError as e:
-            body = (e.read() if e.fp else b"") or str(e).encode()
-            headers, status = e.headers, e.code
-        except Exception as e:
-            return self._text(502, "Proxy error: %s" % e)
+
+        body = headers = status = None
+        for attempt in range(1, MAX_RETRIES + 2):  # initial try + MAX_RETRIES retries
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    body, headers, status = resp.read(), resp.headers, resp.status
+            except urllib.error.HTTPError as e:
+                body = (e.read() if e.fp else b"") or str(e).encode()
+                headers, status = e.headers, e.code
+            except Exception as e:
+                return self._text(502, "Proxy error: %s" % e)
+
+            # Respect rate limiting: back off and retry on 429 (and transient 503).
+            if status in (429, 503) and attempt <= MAX_RETRIES:
+                wait = retry_after_seconds(headers)
+                if wait is None:
+                    wait = 2 ** (attempt - 1)          # 1, 2, 4, 8 … backoff
+                wait = min(wait, MAX_RETRY_WAIT)
+                self.log_message("upstream %d (rate limit); waiting %.1fs, retry %d/%d: %s",
+                                 status, wait, attempt, MAX_RETRIES, target)
+                time.sleep(wait)
+                continue
+            break
 
         ctype = headers.get("Content-Type", "application/octet-stream") if headers else "application/octet-stream"
         extra = {}
         cenc = headers.get("Content-Encoding") if headers else None
         if cenc:
             extra["Content-Encoding"] = cenc
+        # If we still got rate-limited after our retries, pass Retry-After through so the
+        # client can keep respecting it.
+        if status in (429, 503) and headers and headers.get("Retry-After"):
+            extra["Retry-After"] = headers.get("Retry-After")
         self._send(status, body, ctype, extra)
 
     def _kcc(self):

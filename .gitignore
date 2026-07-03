@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+
+# personal working files (chapter URL lists, generated books)
+chapters.txt
+*.cbz
+*.epub
+*.kepub.epub

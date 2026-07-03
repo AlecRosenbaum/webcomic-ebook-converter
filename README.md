@@ -104,3 +104,7 @@ Example: `PROFILE=KPW5 ./run.sh` targets a Paperwhite 5.
   those.
 - WebP isn't a core EPUB image type; JPEG/PNG (the usual webcomic case) are safest
   for older Kindles.
+- **Webtoon mode**: KCC merges each folder of images into one strip and rejects any
+  strip taller than 524288 px. The tool auto-groups a long source into height-capped
+  subfolders (breaking at chapter boundaries) so this never trips. A *single* image
+  taller than that cap is still rejected by KCC — split it before importing.

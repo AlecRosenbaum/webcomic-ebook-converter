@@ -690,6 +690,31 @@ ${spine}  </spine>
   }
   const pad=(n,len)=>String(n).padStart(len,'0');
 
+  // KCC's webtoon merge (comic2panel) concatenates every image IN A DIRECTORY into one
+  // strip and hard-errors if that strip exceeds 524288px tall. So for webtoon mode we
+  // group images into numbered subfolders, keeping each folder's cumulative source
+  // height under a safe cap (and starting a fresh folder at chapter boundaries). KCC
+  // then merges/splits each folder independently and stitches them back in order.
+  const WEBTOON_CAP = 480000; // safely under KCC's 524288 px per-directory limit
+  async function buildWebtoonCbz(ok){
+    buildStatus.textContent='Reading image sizes…';
+    const measured = await mapLimit(ok, 4, async r => {
+      const sz = await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
+      return {data:r.data, ext:r.ext, chapter:r.chapter, h:(sz.h||0)};
+    });
+    const files=[]; let folder=0, cum=0, inFolder=0, lastChapter=null, oversized=0;
+    measured.forEach((m,i)=>{
+      const h=m.h||0;
+      if(h>WEBTOON_CAP) oversized++;
+      const chapterChanged = (m.chapter!=null && m.chapter!==lastChapter);
+      if(i>0 && (chapterChanged || cum+h>WEBTOON_CAP)){ folder++; cum=0; inFolder=0; }
+      lastChapter=m.chapter; cum+=h; inFolder++;
+      files.push({name:`${pad(folder+1,4)}/${pad(inFolder,4)}.${m.ext}`, data:m.data});
+    });
+    if(oversized) log(`Warning: ${oversized} image(s) exceed ${WEBTOON_CAP}px tall on their own — KCC may still reject those. Consider splitting them first.`, 'w');
+    return {cbz:buildZip(files), count:measured.length, folders:folder+1};
+  }
+
   // ---------- build CBZ ----------
   buildBtn.onclick=async()=>{
     const sel=items.filter(i=>i.selected);
@@ -706,7 +731,7 @@ ${spine}  </spine>
           const how=await fetchImageBytes(it);
           fetched++; if(how==='direct') viaDirect++; else viaProxy++;
         }
-        return {order:idx, data:it.data, ext:it.ext};
+        return {order:idx, data:it.data, ext:it.ext, chapter:it.chapter};
       }catch(err){
         failed.push({url:it.url, err:err.message});
         return null;
@@ -736,10 +761,17 @@ ${spine}  </spine>
         ext='epub'; pageCount=pages.length;
       }else if(fmt==='kcc'){
         // Build the CBZ in-browser, then let the server run KCC on it.
-        buildStatus.textContent='Packaging CBZ…';
-        const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
-        const cbz=buildZip(files); pageCount=files.length;
         const wt = webtoonEl.checked;
+        let cbz;
+        if(wt){
+          const built=await buildWebtoonCbz(ok);
+          cbz=built.cbz; pageCount=built.count;
+          log(`Webtoon: grouped ${built.count} image(s) into ${built.folders} folder(s) to stay under KCC's merge limit.`, 'ok');
+        }else{
+          buildStatus.textContent='Packaging CBZ…';
+          const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
+          cbz=buildZip(files); pageCount=files.length;
+        }
         buildStatus.textContent='Optimizing with KCC on the server… first run builds KCC (~1 min), then it’s cached.';
         log('Sending CBZ to server → KCC (profile KoLC, kepub, --forcecolor -u'+(wt?' -w':'')+(!wt&&rtlEl.checked?' -m':'')+')…');
         const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())

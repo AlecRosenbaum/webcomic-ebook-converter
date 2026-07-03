@@ -47,10 +47,18 @@
   .count{color:var(--muted); font-size:13px}
   details{margin-top:12px}
   summary{cursor:pointer; color:var(--muted); font-size:13px; user-select:none}
-  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px}
-  .chap{grid-column:1/-1; display:flex; align-items:center; gap:10px; color:var(--accent2); font-size:12px; font-weight:600; border-top:1px solid var(--line); padding-top:12px; margin-top:4px}
-  .chap:first-child{border-top:none; padding-top:0; margin-top:0}
-  .chap .src{color:var(--muted); font-weight:400; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .grid{display:flex; flex-direction:column; gap:4px}
+  .chap-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin:10px 0 6px}
+  .chap{
+    display:flex; align-items:center; gap:10px; color:var(--accent2); font-size:12px; font-weight:600;
+    border-top:1px solid var(--line); padding:12px 8px 8px; margin-top:4px; cursor:pointer; user-select:none;
+  }
+  .chap:first-child{border-top:none}
+  .chap:hover{background:var(--panel2); border-radius:8px}
+  .chap .caret{display:inline-block; width:12px; transition:transform .12s; color:var(--muted)}
+  .chap.open .caret{transform:rotate(90deg)}
+  .chap .src{color:var(--muted); font-weight:400; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0}
+  .chap .cc{color:var(--muted); font-weight:400; font-size:11px; white-space:nowrap}
   .card{
     background:var(--panel2); border:1px solid var(--line); border-radius:10px; overflow:hidden;
     position:relative; cursor:grab; display:flex; flex-direction:column;
@@ -116,10 +124,12 @@
       <button class="sm" id="sortName">Sort by name</button>
       <button class="sm" id="reverse">Reverse</button>
       <button class="sm" id="cullSmall">Deselect small (&lt;300px)</button>
+      <button class="sm" id="expandAll">Expand all</button>
+      <button class="sm" id="collapseAll">Collapse all</button>
       <span class="spacer"></span>
       <span class="count" id="count"></span>
     </div>
-    <div class="hint" style="margin:-4px 0 12px">Chapters are grouped below in fetch order. Drag tiles to reorder; pages are numbered in this order across the whole book.</div>
+    <div class="hint" style="margin:-4px 0 12px">Chapters are grouped below in fetch order (click a header to expand/collapse). Only the first is open by default so large series stay snappy. Drag tiles to reorder; pages are numbered in this order across the whole book.</div>
     <div class="grid" id="grid"></div>
 
     <div class="row" style="margin-top:18px; align-items:flex-end">
@@ -334,41 +344,83 @@
     countEl.textContent = `${sel} selected / ${items.length} images · ${chapters} chapter${chapters===1?'':'s'}`;
   }
 
+  // Open chapters (by chapter number). null = not yet initialized (first render opens
+  // only chapter 1 so a huge series doesn't create thousands of <img> at once).
+  let expandedChapters = null;
+
+  // Group items into contiguous runs of the same chapter (keeps global index `gi`).
+  function chapterGroups(){
+    const groups=[];
+    items.forEach((it, gi)=>{
+      const last=groups[groups.length-1];
+      if(last && last.chapter===it.chapter) last.entries.push({it, gi});
+      else groups.push({chapter:it.chapter, chapterUrl:it.chapterUrl, entries:[{it, gi}]});
+    });
+    return groups;
+  }
+
+  function updateChapterHeader(ch){
+    const el=gridEl.querySelector(`.chap[data-chapter="${ch}"] .cc`);
+    if(!el) return;
+    const inCh=items.filter(i=>i.chapter===ch);
+    el.textContent=`${inCh.filter(i=>i.selected).length}/${inCh.length} selected`;
+  }
+
+  function makeCard(it, i){
+    const card=document.createElement('div');
+    card.className='card'+(it.selected?'':' off');
+    card.draggable=true; card.dataset.i=i;
+
+    const tw=document.createElement('div'); tw.className='thumbwrap';
+    const img=document.createElement('img');
+    img.loading='lazy';
+    img.src=it.url; // try direct first (display only)
+    img.onerror=()=>{ if(!img.dataset.proxied){ img.dataset.proxied='1'; img.src=proxify(it.url); } else { tw.innerHTML='<div class="broken">preview failed<br>(may still download)</div>'; } };
+    img.onload=()=>{ it.naturalW=img.naturalWidth; const d=card.querySelector('.dim'); if(d) d.textContent=img.naturalWidth+'×'+img.naturalHeight; };
+    tw.appendChild(img);
+
+    const idx=document.createElement('span'); idx.className='idx'; idx.textContent=i+1; tw.appendChild(idx);
+    const chk=document.createElement('input'); chk.type='checkbox'; chk.className='chk'; chk.checked=it.selected;
+    chk.onclick=e=>e.stopPropagation();
+    chk.onchange=()=>{ it.selected=chk.checked; card.classList.toggle('off',!it.selected); updateCount(); updateChapterHeader(it.chapter); };
+    tw.appendChild(chk);
+    card.appendChild(tw);
+
+    const meta=document.createElement('div'); meta.className='meta';
+    meta.innerHTML=`<span class="dim">${it.naturalW?(it.naturalW+'px'):'…'}</span> · ${nameFromUrl(it.url)}`;
+    card.appendChild(meta);
+
+    addDnD(card);
+    return card;
+  }
+
   function render(){
     gridEl.innerHTML='';
-    let lastChapter=null;
-    items.forEach((it, i) => {
-      if(it.chapter!==lastChapter){
-        lastChapter=it.chapter;
-        const sep=document.createElement('div'); sep.className='chap';
-        sep.innerHTML=`Chapter ${it.chapter} <span class="src">${it.chapterUrl||''}</span>`;
-        gridEl.appendChild(sep);
+    const groups=chapterGroups();
+    if(expandedChapters===null){
+      expandedChapters=new Set();
+      if(groups.length) expandedChapters.add(groups[0].chapter);  // open first chapter only
+    }
+    groups.forEach(g=>{
+      const open=expandedChapters.has(g.chapter);
+      const sel=g.entries.filter(e=>e.it.selected).length;
+      const header=document.createElement('div');
+      header.className='chap'+(open?' open':'');
+      header.dataset.chapter=g.chapter;
+      header.innerHTML=`<span class="caret">▶</span> Chapter ${g.chapter} `
+        + `<span class="src">${g.chapterUrl||''}</span> `
+        + `<span class="cc">${sel}/${g.entries.length} selected</span>`;
+      header.onclick=()=>{
+        if(expandedChapters.has(g.chapter)) expandedChapters.delete(g.chapter);
+        else expandedChapters.add(g.chapter);
+        render();
+      };
+      gridEl.appendChild(header);
+      if(open){  // only build image cards for open chapters
+        const grid=document.createElement('div'); grid.className='chap-grid';
+        g.entries.forEach(e=> grid.appendChild(makeCard(e.it, e.gi)));
+        gridEl.appendChild(grid);
       }
-      const card=document.createElement('div');
-      card.className='card'+(it.selected?'':' off');
-      card.draggable=true; card.dataset.i=i;
-
-      const tw=document.createElement('div'); tw.className='thumbwrap';
-      const img=document.createElement('img');
-      img.loading='lazy';
-      img.src=it.url; // try direct first (display only)
-      img.onerror=()=>{ if(!img.dataset.proxied){ img.dataset.proxied='1'; img.src=proxify(it.url); } else { tw.innerHTML='<div class="broken">preview failed<br>(may still download)</div>'; } };
-      img.onload=()=>{ it.naturalW=img.naturalWidth; const d=card.querySelector('.dim'); if(d) d.textContent=img.naturalWidth+'×'+img.naturalHeight; };
-      tw.appendChild(img);
-
-      const idx=document.createElement('span'); idx.className='idx'; idx.textContent=i+1; tw.appendChild(idx);
-      const chk=document.createElement('input'); chk.type='checkbox'; chk.className='chk'; chk.checked=it.selected;
-      chk.onclick=e=>e.stopPropagation();
-      chk.onchange=()=>{ it.selected=chk.checked; card.classList.toggle('off',!it.selected); updateCount(); };
-      tw.appendChild(chk);
-      card.appendChild(tw);
-
-      const meta=document.createElement('div'); meta.className='meta';
-      meta.innerHTML=`<span class="dim">${it.naturalW?(it.naturalW+'px'):'…'}</span> · ${nameFromUrl(it.url)}`;
-      card.appendChild(meta);
-
-      addDnD(card);
-      gridEl.appendChild(card);
     });
     updateCount();
   }
@@ -406,6 +458,8 @@
   $('reverse').onclick=()=>{ items.reverse(); render(); };
   $('sortName').onclick=()=>{ items.sort((a,b)=> a.chapter-b.chapter || nameFromUrl(a.url).localeCompare(nameFromUrl(b.url),undefined,{numeric:true,sensitivity:'base'})); render(); };
   $('cullSmall').onclick=()=>{ items.forEach(i=>{ if(i.naturalW && i.naturalW<300) i.selected=false; }); render(); };
+  $('expandAll').onclick=()=>{ expandedChapters=new Set(items.map(i=>i.chapter)); render(); };
+  $('collapseAll').onclick=()=>{ expandedChapters=new Set(); render(); };
 
   // ---------- main fetch flow ----------
   fetchBtn.onclick=async()=>{
@@ -461,7 +515,7 @@
   };
 
   clearBtn.onclick=()=>{
-    items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0;
+    items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0; expandedChapters=null;
     gridEl.innerHTML=''; resultsPanel.style.display='none'; clearLog();
     fnameEl.value='';
   };

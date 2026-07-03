@@ -44,9 +44,9 @@ device-height pages for vertical-scroll manhwa; it supersedes RTL (a vertical
 webtoon has no left/right direction), so the two are mutually exclusive.
 
 **Split into volumes** partitions the book into ~N MB volumes (whole chapters
-kept together) and downloads them as a single `.zip` of volumes — much friendlier
-than one multi-GB book. The first KCC build compiles KCC and its dependencies
-(~450 MB, via `uvx`) and caches them; later runs are fast.
+kept together), each downloaded as its own file — much friendlier than one
+multi-GB book, and nothing to extract. The first KCC build compiles KCC and its
+dependencies (~450 MB, via `uvx`) and caches them; later runs are fast.
 
 ## How it works
 
@@ -60,7 +60,7 @@ the browser never holds the images or the (potentially multi-GB) output in memor
 | `GET /proxy?url=…` | fetches a remote page/image with a browser-like User-Agent + Referer (for scraping image URLs off the pages) |
 | `POST /build` | JSON `{images:[{url,chapter}], format, name, …}` → starts a background job that downloads, assembles, splits, and runs KCC. Returns `{job}` |
 | `GET /build/status?job=…` | progress JSON (phase, done/total) |
-| `GET /build/result?job=…` | streams the finished file (epub / cbz / zip of volumes) |
+| `GET /build/result?job=…&vol=N` | streams volume N of the finished book (each volume is a separate download) |
 | `GET /health` | reports whether `uv`/`uvx` and `7zz` are available |
 
 The result is downloaded via a plain link, so the browser streams it to disk
@@ -125,3 +125,7 @@ don't blow up server memory.
   strip taller than 524288 px. The tool auto-groups a long source into height-capped
   subfolders (breaking at chapter boundaries) so this never trips. A *single* image
   taller than that cap is still rejected by KCC — split it before importing.
+- **Failed downloads**: transient failures (rate limits, 5xx, network errors) are
+  retried with backoff, then any stragglers are retried once more sequentially. If
+  an image still can't be fetched (e.g. a dead link), it's reported — the count in
+  the result and the exact URLs in the log — rather than silently leaving a gap.

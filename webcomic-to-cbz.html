@@ -152,7 +152,7 @@
     <label id="splitRow" style="display:none; align-items:center; gap:8px; margin-top:8px; font-size:13px; color:var(--text); cursor:pointer">
       <input type="checkbox" id="split" style="width:auto"> Split into volumes of ~
       <input type="number" id="splitSize" value="100" min="10" step="10" style="width:70px; padding:4px 6px"> MB
-      <span style="color:var(--muted)">(whole chapters kept together; downloads a .zip of volumes)</span>
+      <span style="color:var(--muted)">(whole chapters kept together; each volume downloads as its own file)</span>
     </label>
     <div class="progress" id="buildProgress"><div></div></div>
     <div id="buildStatus" class="hint"></div>
@@ -494,7 +494,7 @@
       rtl: rtlEl.checked,
       webtoon: (fmt==='kcc' && webtoonEl.checked),
       split_mb: (splitEl.checked ? (parseFloat(splitSizeEl.value)||100) : 0),
-      images: sel.map(it=>({url:it.url, chapter:it.chapter})),
+      images: sel.map(it=>({url:it.url, chapter:it.chapter, chapterUrl:it.chapterUrl})),
     };
     clearLog();
     log(`Server build: sending ${sel.length} image URL(s) (${fmt.toUpperCase()}${payload.split_mb?`, ~${payload.split_mb}MB volumes`:''})…`);
@@ -529,15 +529,26 @@
       }
       if(st.ready) break;
     }
-    // Download the finished file via a direct link: the browser streams it to disk,
-    // so a multi-GB result is never held in JS memory.
-    const a=document.createElement('a');
-    a.href=SERVER_BASE+'/build/result?job='+encodeURIComponent(job);
-    if(st.filename) a.download=st.filename;
-    document.body.appendChild(a); a.click(); a.remove();
     setProgress(buildProgress,null);
-    buildStatus.innerHTML=`<span class="pill">done</span> ${st.message||'Done.'} Downloading <b>${st.filename||'file'}</b>…`;
-    log(`Server build complete → ${st.filename}${st.failed?` (${st.failed} images skipped)`:''}`, 'ok');
+    // Download each volume via a direct link — the browser streams each straight to
+    // disk (never held in JS memory), and there's no archive to extract.
+    const names = st.volume_names || [];
+    const linkFor = i => `${SERVER_BASE}/build/result?job=${encodeURIComponent(job)}&vol=${i}`;
+    for(let i=0;i<names.length;i++){
+      const a=document.createElement('a');
+      a.href=linkFor(i); a.download=names[i];
+      document.body.appendChild(a); a.click(); a.remove();
+      await sleep(600);  // stagger so the browser doesn't drop rapid-fire downloads
+    }
+    // Also leave clickable links as a fallback (browsers may block bulk auto-downloads).
+    const links = names.map((nm,i)=>`<a class="dl" href="${linkFor(i)}" download="${nm.replace(/"/g,'&quot;')}">${nm}</a>`).join('<br>');
+    const multi = names.length>1;
+    buildStatus.innerHTML=`<span class="pill">done</span> ${st.message||'Done.'}`
+      + (st.failed?` <span style="color:var(--bad)">${st.failed} image(s) could not be downloaded — see the log for which.</span>`:'')
+      + (multi?`<div class="hint" style="margin-top:8px">Downloading ${names.length} volumes. If your browser blocks multiple downloads, click each:</div>`:'')
+      + `<div style="margin-top:6px; line-height:1.9">${links}</div>`;
+    log(`Server build complete → ${names.length} file(s)${st.failed?` · ${st.failed} skipped`:''}`, st.failed?'w':'ok');
+    if(st.failed && st.failed_urls) st.failed_urls.forEach(u=>log('  ✗ missing: '+u, 'e'));
   }
 
   // ---------- build ----------

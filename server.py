@@ -14,7 +14,7 @@ One process does everything (no public CORS proxy, no separate scripts):
                          assembles (+ splits into volumes), runs KCC — all server-side
                          so the browser never holds the images. Returns {job}.
   GET  /build/status?job=..  -> progress JSON
-  GET  /build/result?job=..  -> streams the finished file (epub/cbz/zip)
+  GET  /build/result?job=..&vol=N -> streams volume N of the finished book (epub/cbz)
   GET  /health        -> {"ok":true, "kcc":bool, "sevenzip":bool, ...}
 
 Start it with ./run.sh, which provides the `7zz` binary (via nix) that KCC needs
@@ -162,43 +162,51 @@ def slog(msg):
 
 # ---------- server-side fetch (shared by /proxy and /build) ----------
 
-def do_fetch(url):
-    """Fetch a URL server-side, retrying on 429/503 (Retry-After aware).
-    Returns (status, body, headers); status 0 means a network-level error (body=msg)."""
+# Statuses worth retrying: rate limits, request timeout, and 5xx / Cloudflare origin
+# errors — all typically transient under concurrent load. (403/404 are persistent, so
+# not retried.) Network-level errors (status 0) are retried too.
+RETRYABLE = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527}
+
+
+def do_fetch(url, referer=None):
+    """Fetch a URL server-side, retrying transient failures with backoff.
+    Returns (status, body, headers, neterr); status 0 = network error (neterr=msg)."""
     origin = "{0.scheme}://{0.netloc}".format(urlparse(url))
+    ref = referer if (referer or "").startswith("http") else origin + "/"
     req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept": "*/*", "Referer": origin + "/",
+        "User-Agent": UA, "Accept": "*/*", "Referer": ref,
     })
-    body = headers = status = None
+    body = headers = None
+    status, neterr = 0, None
     for attempt in range(1, MAX_RETRIES + 2):
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
-                body, headers, status = resp.read(), resp.headers, resp.status
+                body, headers, status, neterr = resp.read(), resp.headers, resp.status, None
         except urllib.error.HTTPError as e:
-            body = (e.read() if e.fp else b"") or str(e).encode()
-            headers, status = e.headers, e.code
+            body = (e.read() if e.fp else b"") or b""
+            headers, status, neterr = e.headers, e.code, None
         except Exception as e:
-            return 0, str(e).encode(), None
-        if status in (429, 503) and attempt <= MAX_RETRIES:
+            status, neterr, body, headers = 0, str(e), b"", None
+        if (status == 0 or status in RETRYABLE) and attempt <= MAX_RETRIES:
             wait = retry_after_seconds(headers)
             if wait is None:
                 wait = 2 ** (attempt - 1)
             time.sleep(min(wait, MAX_RETRY_WAIT))
             continue
         break
-    return status, body, headers
+    return status, body, headers, neterr
 
 
-def fetch_cached(url):
-    """Cache-aware fetch. Returns (status, body, content_type)."""
+def fetch_cached(url, referer=None):
+    """Cache-aware fetch. Returns (status, body, content_type, neterr)."""
     c = cache_get(url)
     if c is not None:
-        return 200, c[0], c[1]
-    status, body, headers = do_fetch(url)
+        return 200, c[0], c[1], None
+    status, body, headers, neterr = do_fetch(url, referer)
     ctype = headers.get("Content-Type", "application/octet-stream") if headers else "application/octet-stream"
     if status == 200 and body:
         cache_put(url, body, ctype)
-    return status, body, ctype
+    return status, body, ctype, neterr
 
 
 # ---------- image helpers ----------
@@ -471,16 +479,20 @@ def run_build_job(job_id):
         results = [None] * total
         failed = []
 
+        reasons = {}  # index -> failure reason (for reporting)
+
         def dl(i):
             url = images[i].get("url")
-            status, body, ctype = fetch_cached(url)
+            status, body, ctype, neterr = fetch_cached(url, images[i].get("chapterUrl"))
             if status != 200 or not body:
+                reasons[i] = ("net: " + neterr) if status == 0 else ("HTTP %d" % status)
                 return i, None
             ext = ext_for(ctype, url)
             dims = img_dims(body)
             path = os.path.join(imgdir, "%06d.%s" % (i, ext))
             with open(path, "wb") as f:
                 f.write(body)
+            reasons.pop(i, None)
             return i, {"path": path, "ext": ext, "size": len(body),
                        "w": dims[0] if dims else 0, "h": dims[1] if dims else 0,
                        "chapter": images[i].get("chapter")}
@@ -488,25 +500,40 @@ def run_build_job(job_id):
         with ThreadPoolExecutor(max_workers=DL_WORKERS) as ex:
             for fut in as_completed([ex.submit(dl, i) for i in range(total)]):
                 i, meta = fut.result()
-                if meta is None:
-                    failed.append(i)
-                else:
+                if meta is not None:
                     results[i] = meta
                 with JOBS_LOCK:
                     job["done"] = job.get("done", 0) + 1
 
+        # Retry stragglers sequentially — concurrency is the usual cause of transient
+        # blocks, so a slow single-threaded pass recovers most of them (no gaps).
+        missing = [i for i in range(total) if results[i] is None]
+        if missing:
+            upd(message="Retrying %d failed download(s)…" % len(missing))
+            slog("build %s: retrying %d stragglers sequentially" % (job_id, len(missing)))
+            for i in missing:
+                time.sleep(0.25)
+                _, meta = dl(i)
+                if meta is not None:
+                    results[i] = meta
+
+        failed = [i for i in range(total) if results[i] is None]
         ok = [m for m in results if m]
         upd(failed=len(failed))
         if not ok:
             upd(phase="error", error="All %d image downloads failed." % total)
             return
         if failed:
-            slog("build %s: %d/%d images failed to download" % (job_id, len(failed), total))
+            sample = ["  #%d %s (%s)" % (i + 1, images[i].get("url"), reasons.get(i, "?"))
+                      for i in failed[:30]]
+            slog("build %s: %d/%d images FAILED after retries:\n%s" %
+                 (job_id, len(failed), total, "\n".join(sample)))
+            upd(failed_urls=[images[i].get("url") for i in failed[:50]])
 
         # 2. Partition into ~split_mb volumes (whole chapters together), build each.
         vols = split_volumes(ok, split_bytes)
         nvol = len(vols)
-        outputs = []  # (path, download_filename)
+        volumes = []  # {path, filename, ctype}
         for vi, vol in enumerate(vols):
             label = name if nvol == 1 else "%s - Vol %s" % (name, str(vi + 1).zfill(2))
             upd(phase="build",
@@ -514,24 +541,17 @@ def run_build_job(job_id):
                 vol_done=vi, vol_total=nvol)
             voldir = os.path.join(workdir, "vol_%03d" % vi)
             path, ext = produce_output(vol, fmt, voldir, safe_name(label), author, rtl, webtoon)
-            outputs.append((path, safe_name(label) + ext))
+            fname = safe_name(label) + ext
+            volumes.append({"path": path, "filename": fname,
+                            "ctype": ("application/vnd.comicbook+zip" if ext == ".cbz"
+                                      else "application/epub+zip")})
 
-        # 3. One output -> return it; many -> bundle into a single zip for download.
-        skipped = (" · %d skipped" % len(failed)) if failed else ""
-        if len(outputs) == 1:
-            path, fname = outputs[0]
-            ctype = ("application/vnd.comicbook+zip" if fname.endswith(".cbz")
-                     else "application/epub+zip")
-            upd(phase="done", ready=True, result=path, filename=fname, ctype=ctype,
-                message="Done — %d images%s." % (len(ok), skipped))
-        else:
-            bundle = os.path.join(workdir, name + ".zip")
-            with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as zf:
-                for path, fname in outputs:
-                    zf.write(path, fname)
-            upd(phase="done", ready=True, result=bundle, filename=name + ".zip",
-                ctype="application/zip",
-                message="Done — %d images in %d volumes%s." % (len(ok), nvol, skipped))
+        # 3. Deliver volumes as individual downloads (no zip -> nothing to extract).
+        skipped = (" · %d SKIPPED (see log)" % len(failed)) if failed else ""
+        vol_note = "" if nvol == 1 else " in %d volumes" % nvol
+        upd(phase="done", ready=True, volumes=volumes,
+            volume_names=[v["filename"] for v in volumes], nvol=nvol,
+            message="Done — %d images%s%s." % (len(ok), vol_note, skipped))
     except subprocess.TimeoutExpired:
         upd(phase="error", error="KCC timed out after %ds." % KCC_TIMEOUT)
     except Exception as e:
@@ -729,26 +749,39 @@ class Handler(BaseHTTPRequestHandler):
             job = JOBS.get(jid)
             if not job:
                 return self._json(404, {"error": "unknown job"})
-            out = {k: job.get(k) for k in ("phase", "done", "total", "failed", "ready",
-                                           "error", "message", "filename", "vol_done", "vol_total")}
+            out = {k: job.get(k) for k in ("phase", "done", "total", "failed", "ready", "error",
+                                           "message", "volume_names", "nvol", "vol_done",
+                                           "vol_total", "failed_urls")}
         return self._json(200, out)
 
     def _build_result(self):
-        jid = (parse_qs(urlparse(self.path).query).get("job") or [""])[0]
+        q = parse_qs(urlparse(self.path).query)
+        jid = (q.get("job") or [""])[0]
+        try:
+            idx = int((q.get("vol") or ["0"])[0])
+        except ValueError:
+            idx = 0
         with JOBS_LOCK:
             job = JOBS.get(jid)
             if not job or not job.get("ready"):
                 return self._text(404, "Result not ready.")
-            path, fname, ctype, workdir = (job.get("result"), job.get("filename"),
-                                           job.get("ctype", "application/octet-stream"), job.get("workdir"))
-        if not path or not os.path.exists(path):
+            vols = job.get("volumes") or []
+            workdir = job.get("workdir")
+        if idx < 0 or idx >= len(vols):
+            return self._text(404, "No such volume.")
+        v = vols[idx]
+        if not os.path.exists(v["path"]):
             return self._text(410, "Result no longer available.")
-        sent = self._send_file(200, path, ctype,
-                               {"Content-Disposition": 'attachment; filename="%s"' % (fname or "download")})
-        if sent:                                    # one-shot: clean up after a full download
-            shutil.rmtree(workdir, ignore_errors=True)
+        sent = self._send_file(200, v["path"], v["ctype"],
+                               {"Content-Disposition": 'attachment; filename="%s"' % v["filename"]})
+        if sent:  # clean up once every volume has been fetched
             with JOBS_LOCK:
-                JOBS.pop(jid, None)
+                job.setdefault("fetched", set()).add(idx)
+                done = len(job["fetched"]) >= len(vols)
+            if done:
+                shutil.rmtree(workdir, ignore_errors=True)
+                with JOBS_LOCK:
+                    JOBS.pop(jid, None)
 
     def _serve_page(self):
         try:
@@ -770,33 +803,9 @@ class Handler(BaseHTTPRequestHandler):
             body, ctype = cached
             return self._send(200, body, ctype, {"X-Cache": "HIT"})
 
-        origin = "{0.scheme}://{0.netloc}".format(urlparse(target))
-        req = urllib.request.Request(target, headers={
-            "User-Agent": UA, "Accept": "*/*", "Referer": origin + "/",
-        })
-
-        body = headers = status = None
-        for attempt in range(1, MAX_RETRIES + 2):  # initial try + MAX_RETRIES retries
-            try:
-                with urllib.request.urlopen(req, timeout=45) as resp:
-                    body, headers, status = resp.read(), resp.headers, resp.status
-            except urllib.error.HTTPError as e:
-                body = (e.read() if e.fp else b"") or str(e).encode()
-                headers, status = e.headers, e.code
-            except Exception as e:
-                return self._text(502, "Proxy error: %s" % e)
-
-            # Respect rate limiting: back off and retry on 429 (and transient 503).
-            if status in (429, 503) and attempt <= MAX_RETRIES:
-                wait = retry_after_seconds(headers)
-                if wait is None:
-                    wait = 2 ** (attempt - 1)          # 1, 2, 4, 8 … backoff
-                wait = min(wait, MAX_RETRY_WAIT)
-                self.log_message("upstream %d (rate limit); waiting %.1fs, retry %d/%d: %s",
-                                 status, wait, attempt, MAX_RETRIES, target)
-                time.sleep(wait)
-                continue
-            break
+        status, body, headers, neterr = do_fetch(target)
+        if status == 0:
+            return self._text(502, "Proxy error: %s" % neterr)
 
         ctype = headers.get("Content-Type", "application/octet-stream") if headers else "application/octet-stream"
         extra = {}

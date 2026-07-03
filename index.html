@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Webcomic → Kindle</title>
+<title>Webcomic → ebook</title>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
@@ -84,8 +84,8 @@
 </head>
 <body>
 <header>
-  <h1>Webcomic → Kindle</h1>
-  <span class="sub">Pull images from a page, pick &amp; order them, download a CBZ / EPUB — or a KCC-optimized Kindle EPUB</span>
+  <h1>Webcomic → ebook</h1>
+  <span class="sub">Pull images from a page, pick &amp; order them, download a CBZ / EPUB — or a KCC-optimized e-reader EPUB (Kobo Libra Colour)</span>
   <span id="serverStatus" class="pill" style="margin-left:auto"></span>
 </header>
 
@@ -194,7 +194,7 @@
   if (['kcc','epub','cbz'].includes(savedFormat)) formatEl.value = savedFormat;
   function syncFormatUI(){
     const f = formatEl.value;
-    buildBtn.textContent = f==='kcc' ? 'Create Kindle EPUB' : (f==='epub' ? 'Create EPUB' : 'Create CBZ');
+    buildBtn.textContent = f==='kcc' ? 'Create e-reader EPUB' : (f==='epub' ? 'Create EPUB' : 'Create CBZ');
     rtlRow.style.display = (f==='epub' || f==='kcc') ? 'flex' : 'none'; // manga (RTL) applies to both
     webtoonRow.style.display = (f==='kcc') ? 'flex' : 'none';           // webtoon splitting is KCC-only
     splitRow.style.display = serverBuild ? 'flex' : 'none';             // volume-split is server-side only

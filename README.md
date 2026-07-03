@@ -1,20 +1,27 @@
-# Webcomic → Kindle
+# Webcomic → ebook
 
-Turn a webcomic's pages into an e-reader-ready book. A local server does the
-heavy lifting — it fetches the pages, downloads the images, assembles the book,
-and runs [KCC](https://github.com/ciromattia/kcc) to optimize it for an e-ink
-device. The browser is only the control panel (paste URLs, pick & reorder), so
-it stays light even for thousands of pages.
+Turn a webcomic's pages into an e-reader-ready book (EPUB / CBZ, or a Kobo
+`.kepub.epub` optimized with [KCC](https://github.com/ciromattia/kcc) — tuned by
+default for the **Kobo Libra Colour**). A local server does the heavy lifting —
+it fetches the pages, downloads the images, assembles the book, and runs KCC. The
+browser is only the control panel (paste URLs, pick & reorder), so it stays light
+even for thousands of pages.
 
 Everything runs locally — nothing is uploaded anywhere.
 
-## Quick start
+## Run it
+
+The easiest way is the prebuilt container (see [Self-hosting](#self-hosting)):
 
 ```bash
-./run.sh
+docker run --rm -p 8788:8788 -v webcomic-cache:/data/cache \
+  ghcr.io/alecrosenbaum/webcomic-ebook-converter:latest
 ```
 
-This opens <http://127.0.0.1:8788/> in your browser. Then:
+Then open <http://127.0.0.1:8788/>. For local development without Docker, use
+`./run.sh` (needs **nix**, **uv/uvx**, and **python3** on PATH).
+
+Once the page is open:
 
 1. Paste one or more **chapter/page URLs** (one per line) — they're fetched in
    order and merged into a single book.
@@ -23,9 +30,9 @@ This opens <http://127.0.0.1:8788/> in your browser. Then:
    numbered continuously across all chapters.
 4. Choose a **Format** (optionally tick **Webtoon mode** and/or **Split into
    volumes**) and click the build button. The server downloads, assembles, and
-   converts; a progress bar tracks it. The finished file streams straight to your
-   downloads folder — copy it to your reader (drag onto a Kobo over USB, or Send
-   to Kindle).
+   converts; a progress bar tracks it. Each finished file streams straight to your
+   downloads folder — copy it onto your Kobo over USB (or Send-to-Kindle for the
+   plain EPUB/CBZ formats).
 
 `./run.sh` requires **nix**, **uv/uvx**, and **python3** on your PATH. Stop the
 server with `Ctrl+C`. Use a different port with `PORT=9000 ./run.sh`.
@@ -45,8 +52,9 @@ webtoon has no left/right direction), so the two are mutually exclusive.
 
 **Split into volumes** partitions the book into ~N MB volumes (whole chapters
 kept together), each downloaded as its own file — much friendlier than one
-multi-GB book, and nothing to extract. The first KCC build compiles KCC and its
-dependencies (~450 MB, via `uvx`) and caches them; later runs are fast.
+multi-GB book, and nothing to extract. (The container image ships with KCC
+pre-installed; local `./run.sh` builds KCC on first use via `uvx` — ~450 MB, then
+cached.)
 
 ## How it works
 
@@ -56,7 +64,7 @@ the browser never holds the images or the (potentially multi-GB) output in memor
 
 | Route | Purpose |
 | --- | --- |
-| `GET /` | serves `webcomic-to-cbz.html` |
+| `GET /` | serves `index.html` |
 | `GET /proxy?url=…` | fetches a remote page/image with a browser-like User-Agent + Referer (for scraping image URLs off the pages) |
 | `POST /build` | JSON `{images:[{url,chapter}], format, name, …}` → starts a background job that downloads, assembles, splits, and runs KCC. Returns `{job}` |
 | `GET /build/status?job=…` | progress JSON (phase, done/total) |
@@ -85,10 +93,11 @@ Override via environment variables when launching:
 
 | Var | Default | Meaning |
 | --- | --- | --- |
+| `HOST` | `127.0.0.1` | bind address (the container image sets `0.0.0.0`) |
 | `PORT` | `8788` | server port |
 | `PROFILE` | `KoLC` | KCC device profile (see `kcc-c2e --help` for the full list) |
 | `KCC_FORMAT` | `EPUB` | KCC output format |
-| `KCC_REF` | pinned commit | KCC git tag/branch/commit to build |
+| `KCC_REF` | pinned commit | KCC git commit for the `uvx` fallback (local dev only; the image bakes KCC in) |
 | `KCC_PY` | `3.12` | Python version `uv` builds KCC with |
 | `KCC_TIMEOUT` | `3600` | KCC subprocess time budget per volume (seconds) |
 | `DL_WORKERS` | `6` | concurrent image downloads during a build |
@@ -105,13 +114,60 @@ Fetched pages and images are cached on disk under `.proxy-cache/` (keyed by URL,
 each image is streamed to a temp file (never all held in RAM), so multi-GB sources
 don't blow up server memory.
 
+## Self-hosting
+
+A container image is built and pushed to GHCR by GitHub Actions on every push to
+`main` (and on `v*` tags) — no local Docker needed. It bundles Python, `7z`, and
+KCC (pinned), and runs a build-time smoke test so a broken image fails CI.
+
+`docker run`:
+
+```bash
+docker run -d --name webcomic-converter \
+  -p 8788:8788 \
+  -v webcomic-cache:/data/cache \
+  -e PROFILE=KoLC \
+  ghcr.io/alecrosenbaum/webcomic-ebook-converter:latest
+```
+
+`docker-compose.yml`:
+
+```yaml
+services:
+  webcomic-converter:
+    image: ghcr.io/alecrosenbaum/webcomic-ebook-converter:latest
+    ports:
+      - "8788:8788"
+    environment:
+      - PROFILE=KoLC            # KCC device profile; see kcc-c2e --help
+      # - KCC_TIMEOUT=7200       # bump for very large webtoons
+    volumes:
+      - webcomic-cache:/data/cache   # persist the download cache across restarts
+    restart: unless-stopped
+
+volumes:
+  webcomic-cache:
+```
+
+Then open `http://<host>:8788/`. The image binds `0.0.0.0` and reads/writes its
+download cache under `/data/cache` (mount a volume to keep it across restarts).
+
+Notes:
+- The GHCR package is private by default. Either make it public in the repo's
+  package settings, or `docker login ghcr.io` with a token that has `read:packages`.
+- **Security**: `/proxy` is an open forward-proxy (it fetches whatever URL it's
+  given) and there's no auth. Keep it on your LAN / behind a VPN or an
+  authenticating reverse proxy — don't expose it to the public internet.
+
 ## Files
 
 | File | Role |
 | --- | --- |
-| `webcomic-to-cbz.html` | the UI — paste URLs, select/reorder, kick off the build (self-contained, no CDN) |
+| `index.html` | the UI — paste URLs, select/reorder, kick off the build (self-contained, no CDN) |
 | `server.py` | fetch proxy + `/build` (download, assemble, split, run KCC), stdlib only |
-| `run.sh` | launcher: provides `7zz` via nix, starts the server, opens the browser |
+| `run.sh` | local-dev launcher: provides `7z` via nix, starts the server, opens the browser |
+| `Dockerfile` | production image (Python + `7z` + KCC baked in) |
+| `.github/workflows/` | CI that builds and publishes the image to GHCR |
 
 ## Notes & limitations
 
@@ -120,7 +176,7 @@ don't blow up server memory.
   or no images from the raw HTML — use the **Add image URLs manually** box for
   those.
 - WebP isn't a core EPUB image type; JPEG/PNG (the usual webcomic case) are safest
-  for older Kindles.
+  for older e-readers.
 - **Webtoon mode**: KCC merges each folder of images into one strip and rejects any
   strip taller than 524288 px. The tool auto-groups a long source into height-capped
   subfolders (breaking at chapter boundaries) so this never trips. A *single* image

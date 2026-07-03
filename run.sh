@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# run.sh — launch the unified Webcomic -> Kindle server.
+# run.sh — launch the unified Webcomic -> ebook server (local dev).
 #
 # It serves the web page, proxies the page/image fetches, and runs Kindle Comic
-# Converter for the "Kindle EPUB (KCC)" option — all from one local server.
+# Converter (KCC) for the "e-reader EPUB" option — all from one local server.
+# (For deployment, use the Docker image instead — see the README.)
 #
 # nix supplies the `7zz` binary KCC needs to unpack archives; the server spawns
 # `uvx` to build & run KCC on demand (first conversion downloads ~450MB, cached after).
@@ -25,7 +26,7 @@ for cmd in nix uvx python3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "error: '$cmd' not found on PATH" >&2; exit 1; }
 done
 
-echo ">> Webcomic -> Kindle server starting on ${URL}"
+echo ">> Webcomic -> ebook server starting on ${URL}"
 echo ">> serves the page + CORS proxy + KCC. First KCC run builds KCC (~450MB), then cached."
 
 # Open the browser once the server answers.

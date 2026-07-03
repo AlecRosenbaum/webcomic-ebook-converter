@@ -4,11 +4,11 @@
 # dependencies = []
 # ///
 """
-Unified local server for the Webcomic -> Kindle tool.
+Unified local server for the Webcomic -> ebook tool.
 
 One process does everything (no public CORS proxy, no separate scripts):
 
-  GET  /              -> serves webcomic-to-cbz.html
+  GET  /              -> serves index.html
   GET  /proxy?url=..  -> CORS proxy: fetches a remote page/image server-side
   POST /build         -> JSON {images:[{url,chapter}], format, name, ...}; downloads,
                          assembles (+ splits into volumes), runs KCC — all server-side
@@ -21,10 +21,11 @@ Start it with ./run.sh, which provides the `7zz` binary (via nix) that KCC needs
 and opens your browser. Standard library only.
 
 Env overrides:
+  HOST        bind address                      [127.0.0.1; container: 0.0.0.0]
   PORT        listen port                       [8788]
   PROFILE     KCC device profile                [KoLC  = Kobo Libra Colour]
   KCC_FORMAT  KCC output format                 [EPUB]
-  KCC_REF     KCC git tag/branch/commit pinned for reproducible builds
+  KCC_REF     KCC git commit for the uvx fallback (local dev only)
   KCC_PY      python uv builds KCC with         [3.12]
   KCC_TIMEOUT KCC subprocess time budget, sec   [3600]
   CACHE_DIR   on-disk proxy cache dir           [<here>/.proxy-cache]
@@ -53,8 +54,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PAGE = os.path.join(HERE, "webcomic-to-cbz.html")
+PAGE = os.path.join(HERE, "index.html")
 
+HOST        = os.environ.get("HOST", "127.0.0.1")  # container/k8s: set 0.0.0.0
 PORT        = int(os.environ.get("PORT", "8788"))
 KCC_PROFILE = os.environ.get("PROFILE", "KoLC")
 KCC_FORMAT  = os.environ.get("KCC_FORMAT", "EPUB")
@@ -272,12 +274,30 @@ def xml_escape(s):
 
 # ---------- KCC command ----------
 
+def kcc_available():
+    """True if we can run KCC — either a pre-installed kcc-c2e (container) or uv/uvx
+    (local dev, which builds KCC on demand)."""
+    return have("kcc-c2e") or have("uvx") or have("uv")
+
+
+def kcc_base_cmd():
+    """Prefer a pre-installed kcc-c2e (baked into the Docker image); otherwise run it
+    on demand via uvx from the pinned commit (local dev)."""
+    if have("kcc-c2e"):
+        return ["kcc-c2e"]
+    if have("uvx"):
+        return ["uvx", "--python", KCC_PY,
+                "--from", "git+https://github.com/ciromattia/kcc@%s" % KCC_REF, "kcc-c2e"]
+    return None
+
+
 def run_kcc(inpath, outdir, name, author, manga, webtoon, log=slog):
     """Run kcc-c2e on a folder or CBZ. Returns the subprocess result."""
-    cmd = ["uvx", "--python", KCC_PY,
-           "--from", "git+https://github.com/ciromattia/kcc@%s" % KCC_REF,
-           "kcc-c2e", "-p", KCC_PROFILE, "-f", KCC_FORMAT, "--forcecolor", "-u",
-           "-t", name, "-o", outdir]
+    base = kcc_base_cmd()
+    if base is None:
+        raise RuntimeError("KCC unavailable: neither kcc-c2e nor uv/uvx on PATH.")
+    cmd = base + ["-p", KCC_PROFILE, "-f", KCC_FORMAT, "--forcecolor", "-u",
+                  "-t", name, "-o", outdir]
     if author:
         cmd += ["-a", author]
     if webtoon:
@@ -687,7 +707,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._proxy()
         if path == "/health":
             return self._json(200, {"ok": True,
-                                    "kcc": have("uvx") or have("uv"),
+                                    "kcc": kcc_available(),
                                     "sevenzip": have("7zz") or have("7z"),
                                     "cache": bool(CACHE_DIR and CACHE_TTL > 0),
                                     "build": True})
@@ -732,8 +752,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._text(400, "Invalid JSON body: %s" % e)
         if not params.get("images"):
             return self._text(400, "No images to build.")
-        if params.get("format") == "kcc" and not ((have("uvx") or have("uv")) and (have("7zz") or have("7z"))):
-            return self._text(503, "KCC unavailable (need uv/uvx + 7zz — launch via ./run.sh).")
+        if params.get("format") == "kcc" and not (kcc_available() and (have("7zz") or have("7z"))):
+            return self._text(503, "KCC unavailable (need kcc-c2e or uv/uvx, plus 7z/7zz).")
         job_id = uuid.uuid4().hex[:12]
         workdir = tempfile.mkdtemp(prefix="build_")
         with JOBS_LOCK:
@@ -788,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(PAGE, "rb") as f:
                 body = f.read()
         except FileNotFoundError:
-            return self._text(500, "webcomic-to-cbz.html not found next to server.py")
+            return self._text(500, "index.html not found next to server.py")
         self._send(200, body, "text/html; charset=utf-8")
 
     def _proxy(self):
@@ -826,10 +846,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print("Webcomic -> Kindle server: http://127.0.0.1:%d/" % PORT)
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    print("Webcomic -> ebook server: http://%s:%d/" % (HOST, PORT))
     print("  build: POST /build (server-side download+assemble+KCC)   profile=%s format=%s" % (KCC_PROFILE, KCC_FORMAT))
-    print("  7zz on PATH: %s | uv/uvx on PATH: %s" % (have("7zz") or have("7z"), have("uvx") or have("uv")))
+    print("  KCC available: %s | 7z/7zz on PATH: %s" % (kcc_available(), have("7zz") or have("7z")))
     if CACHE_DIR and CACHE_TTL > 0:
         print("  proxy cache: %s (TTL %.0fh) — delete it to clear" % (CACHE_DIR, CACHE_TTL / 3600))
     print("  Ctrl+C to stop.")

@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.proxy-cache
+__pycache__
+*.pyc
+*.cbz
+*.epub
+*.kepub.epub
+chapters.txt
+run.sh
+README.md
+LICENSE

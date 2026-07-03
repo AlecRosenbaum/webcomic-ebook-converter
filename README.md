@@ -102,17 +102,23 @@ Override via environment variables when launching:
 | `KCC_TIMEOUT` | `3600` | KCC subprocess time budget per volume (seconds) |
 | `DL_WORKERS` | `6` | concurrent image downloads during a build |
 | `CACHE_DIR` | `.proxy-cache` | on-disk download cache location |
-| `CACHE_TTL` | `604800` | cache lifetime in seconds (7 days); `0` disables |
+| `CACHE_TTL` | `604800` | cache lifetime since last use, seconds (7 days); `0` disables |
+| `CACHE_MAX_MB` | `4096` | cache size cap (LRU eviction); `0` disables the cap |
+| `CACHE_SWEEP_SEC` | `3600` | how often the background cache sweep runs |
 
 Example: `PROFILE=KPW5 ./run.sh` targets a Paperwhite 5.
 
 ### Download cache
 
-Fetched pages and images are cached on disk under `.proxy-cache/` (keyed by URL,
-7-day TTL) so re-running a chapter doesn't re-download every image. Delete the
-`.proxy-cache/` folder (or set `CACHE_TTL=0`) to clear/disable it. During a build
-each image is streamed to a temp file (never all held in RAM), so multi-GB sources
-don't blow up server memory.
+Fetched pages and images are cached on disk under `.proxy-cache/` (keyed by URL)
+so re-running a chapter doesn't re-download every image. A background sweep
+(every `CACHE_SWEEP_SEC`, and right after each build) reclaims space: it deletes
+entries not used within `CACHE_TTL` and, if the cache still exceeds `CACHE_MAX_MB`,
+evicts least-recently-used entries until it's under the cap. A cache hit refreshes
+an entry's "last used" time, so actively-used images stick around. You can still
+delete `.proxy-cache/` by hand, or set `CACHE_TTL=0` to disable caching. During a
+build each image is streamed to a temp file (never all held in RAM), so multi-GB
+sources don't blow up server memory.
 
 ## Self-hosting
 

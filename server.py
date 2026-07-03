@@ -29,7 +29,9 @@ Env overrides:
   KCC_PY      python uv builds KCC with         [3.12]
   KCC_TIMEOUT KCC subprocess time budget, sec   [3600]
   CACHE_DIR   on-disk proxy cache dir           [<here>/.proxy-cache]
-  CACHE_TTL   proxy cache lifetime, seconds     [604800 = 7 days; 0 disables]
+  CACHE_TTL   cache lifetime since last use, s  [604800 = 7 days; 0 disables]
+  CACHE_MAX_MB  cache size cap (LRU eviction)   [4096; 0 disables]
+  CACHE_SWEEP_SEC  background sweep interval, s  [3600]
 """
 
 import os
@@ -72,7 +74,10 @@ KCC_TIMEOUT     = int(os.environ.get("KCC_TIMEOUT", "3600"))     # seconds
 
 # On-disk proxy cache so re-runs don't re-download the same images.
 CACHE_DIR       = os.environ.get("CACHE_DIR", os.path.join(HERE, ".proxy-cache"))
-CACHE_TTL       = float(os.environ.get("CACHE_TTL", str(7 * 24 * 3600)))  # seconds; 0 disables
+CACHE_TTL       = float(os.environ.get("CACHE_TTL", str(7 * 24 * 3600)))  # seconds since last use; 0 disables
+CACHE_MAX_MB    = float(os.environ.get("CACHE_MAX_MB", "4096"))           # size cap; 0 disables
+CACHE_MAX_BYTES = int(CACHE_MAX_MB * 1024 * 1024)
+CACHE_SWEEP_SEC = int(os.environ.get("CACHE_SWEEP_SEC", "3600"))          # background sweep interval
 
 # Server-side build (/build): download images + assemble + KCC without the browser
 # ever holding gigabytes.
@@ -111,6 +116,10 @@ def cache_get(url):
                 ct = f.read().strip() or ct
         except OSError:
             pass
+        try:
+            os.utime(binp, None)   # mark recently used (mtime = last access) for LRU + TTL
+        except OSError:
+            pass
         return body, ct
     except OSError:
         return None
@@ -130,6 +139,67 @@ def cache_put(url, body, ctype):
             f.write(ctype or "application/octet-stream")
     except OSError:
         pass
+
+
+def prune_cache():
+    """Reclaim disk: delete entries older than CACHE_TTL (since last use), then, if the
+    cache still exceeds CACHE_MAX_BYTES, evict least-recently-used entries until under
+    the cap. Each entry is a `<hash>.bin` (body) + `<hash>.ct` (content-type) pair,
+    keyed on the .bin's mtime (bumped on every cache hit)."""
+    if not CACHE_DIR:
+        return
+    try:
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+
+    def rm(*paths):
+        for p in paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    now = time.time()
+    entries = []  # (mtime, size, binp, ctp)
+    for n in names:
+        if not n.endswith(".bin"):
+            continue
+        binp = os.path.join(CACHE_DIR, n)
+        ctp = binp[:-4] + ".ct"
+        try:
+            st = os.stat(binp)
+        except OSError:
+            continue
+        if CACHE_TTL > 0 and (now - st.st_mtime) > CACHE_TTL:
+            rm(binp, ctp)
+            continue
+        size = st.st_size
+        try:
+            size += os.stat(ctp).st_size
+        except OSError:
+            pass
+        entries.append((st.st_mtime, size, binp, ctp))
+
+    if CACHE_MAX_BYTES > 0:
+        total = sum(e[1] for e in entries)
+        if total > CACHE_MAX_BYTES:
+            entries.sort(key=lambda e: e[0])   # least-recently-used first
+            for mtime, size, binp, ctp in entries:
+                if total <= CACHE_MAX_BYTES:
+                    break
+                rm(binp, ctp)
+                total -= size
+
+
+def cache_maintenance_loop():
+    """Background thread: prune the cache at startup and every CACHE_SWEEP_SEC."""
+    while True:
+        try:
+            prune_cache()
+        except Exception as e:
+            slog("cache prune error: %s" % e)
+        time.sleep(max(60, CACHE_SWEEP_SEC))
 
 
 def retry_after_seconds(headers):
@@ -550,6 +620,8 @@ def run_build_job(job_id):
                  (job_id, len(failed), total, "\n".join(sample)))
             upd(failed_urls=[images[i].get("url") for i in failed[:50]])
 
+        prune_cache()  # downloads just grew the cache the most — enforce the cap now
+
         # 2. Partition into ~split_mb volumes (whole chapters together), build each.
         vols = split_volumes(ok, split_bytes)
         nvol = len(vols)
@@ -851,7 +923,8 @@ def main():
     print("  build: POST /build (server-side download+assemble+KCC)   profile=%s format=%s" % (KCC_PROFILE, KCC_FORMAT))
     print("  KCC available: %s | 7z/7zz on PATH: %s" % (kcc_available(), have("7zz") or have("7z")))
     if CACHE_DIR and CACHE_TTL > 0:
-        print("  proxy cache: %s (TTL %.0fh) — delete it to clear" % (CACHE_DIR, CACHE_TTL / 3600))
+        print("  proxy cache: %s (TTL %.0fh, max %.0fMB, auto-swept)" % (CACHE_DIR, CACHE_TTL / 3600, CACHE_MAX_MB))
+        threading.Thread(target=cache_maintenance_loop, daemon=True).start()
     print("  Ctrl+C to stop.")
     try:
         httpd.serve_forever()

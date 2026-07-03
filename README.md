@@ -27,7 +27,9 @@ Once the page is open:
    order and merged into a single book. For "single image + next button" comics,
    tick **Crawl** and paste just the first page; it follows the `next` link to the
    end (starting a new chapter each time the URL path changes, e.g.
-   `…/The_Hook/2` → `…/Rushes/1`).
+   `…/The_Hook/2` → `…/Rushes/1`). If it hits the page limit, bump the number and
+   click **Resume crawl** to continue from where it stopped — same chapter, no
+   re-finding the last page.
 2. Click **Fetch all**. Thumbnails appear, grouped by chapter (only the first
    chapter is expanded — click a header, or Expand all, to see the rest).
 3. **Pick & order**: untick junk (ads/banners), drag tiles to reorder. Pages are

@@ -110,6 +110,7 @@
 
     <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
       <button id="fetchBtn" class="primary">Fetch all</button>
+      <button id="resumeBtn" style="display:none">Resume crawl</button>
       <button id="clearBtn">Clear</button>
     </div>
 
@@ -181,7 +182,7 @@
 
   // ---------- elements ----------
   const $ = id => document.getElementById(id);
-  const urlsEl=$('urls'), crawlEl=$('crawl'), crawlMaxEl=$('crawlMax');
+  const urlsEl=$('urls'), crawlEl=$('crawl'), crawlMaxEl=$('crawlMax'), resumeBtn=$('resumeBtn');
   const fetchBtn=$('fetchBtn'), clearBtn=$('clearBtn'), logEl=$('log');
   crawlEl.addEventListener('change',()=>{ $('crawlHint').style.display=crawlEl.checked?'block':'none'; });
   const fetchProgress=$('fetchProgress'), buildProgress=$('buildProgress');
@@ -193,10 +194,12 @@
   const splitEl=$('split'), splitSizeEl=$('splitSize'), splitRow=$('splitRow');
 
   // ---------- state ----------
-  let items = [];                 // {url, selected, naturalW, chapter, chapterUrl}
+  let items = [];                 // {url, selected, naturalW, chapter, chapterName, chapterUrl}
   let fetchedPages = new Set();   // page URLs already fetched (so re-clicking Fetch all only adds new ones)
-  let seenImages = new Set();     // image URLs already added (dedupes repeats across chapters)
-  let chapterCount = 0;           // number of pages/chapters pulled so far
+  let seenImages = new Set();     // image URLs added (dedupes repeats across chapters)
+  let chapterCount = 0;           // running chapter number
+  let chapterByKey = new Map();   // crawl: URL chapter-key -> chapter number (persists across resumes)
+  let crawlFrontier = [];         // crawl: pages to resume from after hitting the page limit
 
   // ---------- server ----------
   // The page is served by server.py; the proxy, /build and KCC live on the same origin.
@@ -488,6 +491,20 @@
     return {added, title};
   }
 
+  // Map a crawled page to a chapter number by its URL chapter-key, persisting the
+  // mapping so a resumed crawl continues the same chapter (no spurious split) and a
+  // genuinely new path becomes a new chapter.
+  function chapterFor(url){
+    const {key, label}=chapterParts(url);
+    if(chapterByKey.has(key)) return {num:chapterByKey.get(key), label, isNew:false};
+    chapterCount++; chapterByKey.set(key, chapterCount);
+    return {num:chapterCount, label, isNew:true};
+  }
+  function updateResumeBtn(){
+    resumeBtn.style.display = crawlFrontier.length ? 'inline-block' : 'none';
+    resumeBtn.textContent = crawlFrontier.length>1 ? `Resume crawl (${crawlFrontier.length})` : 'Resume crawl';
+  }
+
   // Derive a "chapter key" (stable across pages of the same chapter) and label from a
   // URL by dropping a trailing page-number segment: …/The_Hook/2 -> key …/TPoH/The_Hook,
   // label "The Hook". A new key while crawling starts a new chapter.
@@ -528,6 +545,7 @@
 
   // ---------- main fetch flow ----------
   async function listFetch(all){
+    crawlFrontier=[]; updateResumeBtn();   // a plain list fetch clears any pending crawl resume
     const pages = all.filter(u=>!fetchedPages.has(u));
     if(!pages.length){ log('All listed URLs were already fetched. Edit the list or press Clear to start over.', 'w'); return; }
     let added=0, firstTitle='';
@@ -554,47 +572,65 @@
   async function crawlFetch(starts){
     const maxPages=Math.max(1, parseInt(crawlMaxEl.value,10)||500);
     let added=0, firstTitle='';
+    const frontier=[];
     for(const start of starts){
       if(fetchedPages.has(start)){ log('skip (already fetched): '+start, 'w'); continue; }
-      log(`Crawling from ${start} (max ${maxPages} pages)…`);
-      let url=start, n=0, curKey=null;
+      log(`Crawling from ${start} (up to ${maxPages} pages)…`);
+      let url=start, n=0;
       while(url && n<maxPages){
-        if(fetchedPages.has(url)){ log('   reached an already-visited page — stopping.', 'w'); break; }
+        if(fetchedPages.has(url)){ log('   reached an already-visited page — stopping.', 'w'); url=null; break; }
         let html;
         try{ const res=await fetchVia(url); html=await res.text(); }
-        catch(err){ log(`   ✗ fetch failed: ${err.message} — stopping.`, 'e'); break; }
+        catch(err){ log(`   ✗ fetch failed: ${err.message} — stopping.`, 'e'); url=null; break; }
         fetchedPages.add(url); n++;
-        const {key, label}=chapterParts(url);
-        if(key!==curKey){ curKey=key; chapterCount++; log(`   ▶ chapter ${chapterCount}: ${label||key}`, 'ok'); }
-        const {added:a, title}=addImagesFromPage(html, url, chapterCount, label);
+        const {num, label, isNew}=chapterFor(url);
+        if(isNew) log(`   ▶ chapter ${num}: ${label||url}`, 'ok');
+        const {added:a, title}=addImagesFromPage(html, url, num, label);
         if(!firstTitle && title) firstTitle=title;
         added+=a;
         setProgress(fetchProgress, Math.min(n/maxPages, 0.98));
         if(n%10===0) log(`   …${n} pages, ${added} images so far`);
         const next=findNextUrl(html, url);
-        if(!next){ log(`   no “next” link — end of crawl (${n} pages).`, 'ok'); break; }
+        if(!next){ log(`   no “next” link — end of crawl (${n} pages).`, 'ok'); url=null; break; }
         url=next;
         await sleep(120);   // be gentle
       }
-      if(n>=maxPages) log(`   hit the ${maxPages}-page limit — raise it and Fetch all again to continue.`, 'w');
+      if(url){  // stopped because we hit the page limit; url is the next page to resume from
+        frontier.push(url);
+        log(`   hit the ${maxPages}-page limit at ${url} — “Resume crawl” to continue.`, 'w');
+      }
     }
+    crawlFrontier=frontier; updateResumeBtn();
     setDefaultName(firstTitle || nameFromUrl(starts[0]));
     if(items.length){ resultsPanel.style.display='block'; render(); }
-    log(`Crawl done — added ${added} image(s); ${items.length} total across ${chapterCount} chapter(s).`, added?'ok':'w');
-    if(!added) log('No images found — the “next” detection may not fit this site. Try the manual box, or paste chapter URLs without crawl.', 'w');
+    const chapters=new Set(items.map(i=>i.chapter)).size;
+    log(`Crawl done — added ${added} image(s); ${items.length} total across ${chapters} chapter(s)`
+        + (crawlFrontier.length?`; ${crawlFrontier.length} crawl(s) can resume.`:'.'), added?'ok':'w');
+    if(!added && !crawlFrontier.length) log('No images found — the “next” detection may not fit this site. Try the manual box, or list chapter URLs with crawl off.', 'w');
   }
 
   fetchBtn.onclick=async()=>{
     const all = urlsEl.value.split('\n').map(s=>s.trim()).filter(Boolean);
     if(!all.length){ urlsEl.focus(); return; }
     clearLog();
-    fetchBtn.disabled=true;
+    fetchBtn.disabled=true; resumeBtn.disabled=true;
     try{ await (crawlEl.checked ? crawlFetch(all) : listFetch(all)); }
-    finally{ fetchBtn.disabled=false; setProgress(fetchProgress,null); }
+    finally{ fetchBtn.disabled=false; resumeBtn.disabled=false; setProgress(fetchProgress,null); }
+  };
+
+  resumeBtn.onclick=async()=>{
+    if(!crawlFrontier.length) return;
+    const frontier=crawlFrontier.slice();
+    clearLog();
+    fetchBtn.disabled=true; resumeBtn.disabled=true;
+    log(`Resuming ${frontier.length} crawl(s)…`);
+    try{ await crawlFetch(frontier); }   // chapterByKey persists -> continues the same chapter
+    finally{ fetchBtn.disabled=false; resumeBtn.disabled=false; setProgress(fetchProgress,null); }
   };
 
   clearBtn.onclick=()=>{
     items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0; expandedChapters=null;
+    chapterByKey=new Map(); crawlFrontier=[]; updateResumeBtn();
     gridEl.innerHTML=''; resultsPanel.style.display='none'; clearLog();
     fnameEl.value='';
   };

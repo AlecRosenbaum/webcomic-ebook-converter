@@ -1,9 +1,10 @@
 # Webcomic → Kindle
 
-Turn a webcomic's pages into a Kindle-ready book. A single local server serves a
-web page, proxies the cross-origin fetches the browser can't do itself, and (for
-the Kindle option) runs [KCC](https://github.com/ciromattia/kcc) to optimize the
-output for an e-ink device.
+Turn a webcomic's pages into an e-reader-ready book. A local server does the
+heavy lifting — it fetches the pages, downloads the images, assembles the book,
+and runs [KCC](https://github.com/ciromattia/kcc) to optimize it for an e-ink
+device. The browser is only the control panel (paste URLs, pick & reorder), so
+it stays light even for thousands of pages.
 
 Everything runs locally — nothing is uploaded anywhere.
 
@@ -20,9 +21,11 @@ This opens <http://127.0.0.1:8788/> in your browser. Then:
 2. Click **Fetch all**. Thumbnails appear, grouped by chapter.
 3. **Pick & order**: untick junk (ads/banners), drag tiles to reorder. Pages are
    numbered continuously across all chapters.
-4. Choose a **Format** and click the build button. The file downloads to your
-   browser's downloads folder; copy it to your reader (Send to Kindle, or drag
-   onto a Kobo over USB).
+4. Choose a **Format** (optionally tick **Webtoon mode** and/or **Split into
+   volumes**) and click the build button. The server downloads, assembles, and
+   converts; a progress bar tracks it. The finished file streams straight to your
+   downloads folder — copy it to your reader (drag onto a Kobo over USB, or Send
+   to Kindle).
 
 `./run.sh` requires **nix**, **uv/uvx**, and **python3** on your PATH. Stop the
 server with `Ctrl+C`. Use a different port with `PORT=9000 ./run.sh`.
@@ -31,36 +34,38 @@ server with `Ctrl+C`. Use a different port with `PORT=9000 ./run.sh`.
 
 | Format | What you get |
 | --- | --- |
-| **E-reader EPUB — KCC optimized (KoLC)** | CBZ built in-browser, then run through KCC on the server: downscaled to the device screen, color preserved, gamma-corrected, output as a Kobo `.kepub.epub`. Best for an e-ink reader. |
-| **EPUB (fixed layout)** | Self-contained fixed-layout EPUB 3 built entirely in-browser (no server needed). One image per page, sized to each image. |
-| **CBZ** | Plain comic archive (zipped images), built in-browser. |
+| **E-reader EPUB — KCC optimized (KoLC)** | Run through KCC on the server: downscaled to the device screen, color preserved, gamma-corrected, output as a Kobo `.kepub.epub`. Best for an e-ink reader. |
+| **EPUB (fixed layout)** | Fixed-layout EPUB 3, one image per page sized to each image. |
+| **CBZ** | Plain comic archive (zipped images). |
 
 The **Right-to-left (manga)** checkbox applies to the EPUB and KCC options. The
 **Webtoon mode** checkbox (KCC only) splits tall continuous strips into
 device-height pages for vertical-scroll manhwa; it supersedes RTL (a vertical
 webtoon has no left/right direction), so the two are mutually exclusive.
 
-The KCC option needs the server running (it shows **● server connected · KCC
-ready** in the header). The first KCC conversion builds KCC and its
-dependencies (~450 MB, via `uvx`) and caches them; later runs are fast. Opened as
-a plain `file://` instead of through the server, the page still produces EPUB/CBZ
-in-browser and falls back to public CORS proxies for fetching.
+**Split into volumes** partitions the book into ~N MB volumes (whole chapters
+kept together) and downloads them as a single `.zip` of volumes — much friendlier
+than one multi-GB book. The first KCC build compiles KCC and its dependencies
+(~450 MB, via `uvx`) and caches them; later runs are fast.
 
 ## How it works
 
-The browser's same-origin policy blocks a page from reading another site's HTML
-or image bytes. `server.py` sidesteps this by fetching server-side and returning
-the bytes with permissive CORS headers. It exposes:
+The browser only collects URLs and selections. Everything else is server-side, so
+the browser never holds the images or the (potentially multi-GB) output in memory.
+`server.py` exposes:
 
 | Route | Purpose |
 | --- | --- |
 | `GET /` | serves `webcomic-to-cbz.html` |
-| `GET /proxy?url=…` | fetches a remote page/image with a browser-like User-Agent + Referer |
-| `POST /kcc?name=…` | runs KCC on an uploaded CBZ, returns an optimized EPUB |
+| `GET /proxy?url=…` | fetches a remote page/image with a browser-like User-Agent + Referer (for scraping image URLs off the pages) |
+| `POST /build` | JSON `{images:[{url,chapter}], format, name, …}` → starts a background job that downloads, assembles, splits, and runs KCC. Returns `{job}` |
+| `GET /build/status?job=…` | progress JSON (phase, done/total) |
+| `GET /build/result?job=…` | streams the finished file (epub / cbz / zip of volumes) |
 | `GET /health` | reports whether `uv`/`uvx` and `7zz` are available |
 
-`run.sh` wraps the server in `nix shell nixpkgs#_7zz` so the `7zz` binary KCC
-needs for extraction is on PATH, then opens the browser.
+The result is downloaded via a plain link, so the browser streams it to disk
+rather than buffering it. `run.sh` wraps the server in `nix shell nixpkgs#_7zz` so
+the `7zz` binary KCC needs for extraction is on PATH, then opens the browser.
 
 ## KCC settings
 
@@ -85,27 +90,27 @@ Override via environment variables when launching:
 | `KCC_FORMAT` | `EPUB` | KCC output format |
 | `KCC_REF` | pinned commit | KCC git tag/branch/commit to build |
 | `KCC_PY` | `3.12` | Python version `uv` builds KCC with |
-| `KCC_TIMEOUT` | `3600` | KCC subprocess time budget (seconds) |
-| `CACHE_DIR` | `.proxy-cache` | on-disk proxy cache location |
-| `CACHE_TTL` | `604800` | proxy cache lifetime in seconds (7 days); `0` disables |
+| `KCC_TIMEOUT` | `3600` | KCC subprocess time budget per volume (seconds) |
+| `DL_WORKERS` | `6` | concurrent image downloads during a build |
+| `CACHE_DIR` | `.proxy-cache` | on-disk download cache location |
+| `CACHE_TTL` | `604800` | cache lifetime in seconds (7 days); `0` disables |
 
 Example: `PROFILE=KPW5 ./run.sh` targets a Paperwhite 5.
 
 ### Download cache
 
 Fetched pages and images are cached on disk under `.proxy-cache/` (keyed by URL,
-7-day TTL) so re-running a chapter doesn't re-download every image. When the page
-is served by `./run.sh`, image fetches go through the local `/proxy` so they
-populate and hit this cache. Delete the `.proxy-cache/` folder (or set
-`CACHE_TTL=0`) to clear/disable it. Uploads are streamed to a temp file, so
-multi-GB CBZs (big webtoons) don't blow up server memory.
+7-day TTL) so re-running a chapter doesn't re-download every image. Delete the
+`.proxy-cache/` folder (or set `CACHE_TTL=0`) to clear/disable it. During a build
+each image is streamed to a temp file (never all held in RAM), so multi-GB sources
+don't blow up server memory.
 
 ## Files
 
 | File | Role |
 | --- | --- |
-| `webcomic-to-cbz.html` | the UI — scrape, select/reorder, build (self-contained, no CDN) |
-| `server.py` | page server + CORS proxy + KCC runner (stdlib only) |
+| `webcomic-to-cbz.html` | the UI — paste URLs, select/reorder, kick off the build (self-contained, no CDN) |
+| `server.py` | fetch proxy + `/build` (download, assemble, split, run KCC), stdlib only |
 | `run.sh` | launcher: provides `7zz` via nix, starts the server, opens the browser |
 
 ## Notes & limitations

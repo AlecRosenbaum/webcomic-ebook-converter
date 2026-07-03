@@ -93,28 +93,11 @@
   <div class="panel">
     <label for="urls">Chapter / page URLs <span style="opacity:.6">— one per line, fetched in order and merged into one book</span></label>
     <textarea id="urls" rows="4" placeholder="https://example.com/comic/chapter-1&#10;https://example.com/comic/chapter-2&#10;https://example.com/comic/chapter-3"></textarea>
-    <div class="row" style="margin-top:12px">
-      <div>
-        <label for="proxy">CORS proxy</label>
-        <select id="proxy">
-          <option value="local">localhost (python — recommended)</option>
-          <option value="corsproxy">corsproxy.io</option>
-          <option value="allorigins">allorigins.win</option>
-          <option value="codetabs">codetabs.com</option>
-          <option value="custom">custom…</option>
-          <option value="none">none (direct)</option>
-        </select>
-      </div>
-    </div>
-    <div id="customProxyWrap" style="display:none; margin-top:12px">
-      <label for="customProxy">Custom proxy prefix (the page URL gets URL-encoded and appended)</label>
-      <input id="customProxy" type="text" placeholder="https://my-proxy.example/?url=">
-    </div>
     <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
       <button id="fetchBtn" class="primary">Fetch all</button>
       <button id="clearBtn">Clear</button>
     </div>
-    <div class="hint">Browsers can't read another site's pages/images without a proxy. Best option: launch with <code>./run.sh</code> and open the page it serves — the proxy (and KCC) run on the same local server, so leave this on “localhost”. Public proxies are a fallback. All packaging happens locally in your browser.</div>
+    <div class="hint">Launch with <code>./run.sh</code> and open the page it serves. The local server fetches pages and images, assembles the book, and runs KCC — the browser only handles selection, so it stays light even for thousands of pages.</div>
 
     <details>
       <summary>Add image URLs manually (one per line)</summary>
@@ -166,6 +149,11 @@
     <label id="webtoonRow" style="display:none; align-items:center; gap:8px; margin-top:8px; font-size:13px; color:var(--text); cursor:pointer">
       <input type="checkbox" id="webtoon" style="width:auto"> Webtoon mode — split tall continuous strips into device-height pages (manhwa)
     </label>
+    <label id="splitRow" style="display:none; align-items:center; gap:8px; margin-top:8px; font-size:13px; color:var(--text); cursor:pointer">
+      <input type="checkbox" id="split" style="width:auto"> Split into volumes of ~
+      <input type="number" id="splitSize" value="100" min="10" step="10" style="width:70px; padding:4px 6px"> MB
+      <span style="color:var(--muted)">(whole chapters kept together; downloads a .zip of volumes)</span>
+    </label>
     <div class="progress" id="buildProgress"><div></div></div>
     <div id="buildStatus" class="hint"></div>
   </div>
@@ -177,7 +165,7 @@
 
   // ---------- elements ----------
   const $ = id => document.getElementById(id);
-  const urlsEl=$('urls'), proxyEl=$('proxy'), customProxyWrap=$('customProxyWrap'), customProxyEl=$('customProxy');
+  const urlsEl=$('urls');
   const fetchBtn=$('fetchBtn'), clearBtn=$('clearBtn'), logEl=$('log');
   const fetchProgress=$('fetchProgress'), buildProgress=$('buildProgress');
   const resultsPanel=$('resultsPanel'), gridEl=$('grid'), countEl=$('count');
@@ -185,41 +173,21 @@
   const manualUrls=$('manualUrls'), addManualBtn=$('addManualBtn');
   const authorEl=$('author'), formatEl=$('format'), rtlEl=$('rtl'), rtlRow=$('rtlRow');
   const webtoonEl=$('webtoon'), webtoonRow=$('webtoonRow');
+  const splitEl=$('split'), splitSizeEl=$('splitSize'), splitRow=$('splitRow');
 
   // ---------- state ----------
-  let items = [];                 // {url, selected, naturalW, data, ext, chapter, chapterUrl}
-  let directMode = null;          // image fetch: null=unknown, true=direct CORS works, false=use proxy
+  let items = [];                 // {url, selected, naturalW, chapter, chapterUrl}
   let fetchedPages = new Set();   // page URLs already fetched (so re-clicking Fetch all only adds new ones)
   let seenImages = new Set();     // image URLs already added (dedupes repeats across chapters)
   let chapterCount = 0;           // number of pages/chapters pulled so far
 
-  // ---------- proxy ----------
-  const LOCAL_PORT = 8788;
-  // When the page is served by server.py, the proxy + KCC live on the same origin.
-  // Opened as a file://, fall back to the default localhost port.
+  // ---------- server ----------
+  // The page is served by server.py; the proxy, /build and KCC live on the same origin.
   const SERVED = location.protocol === 'http:' || location.protocol === 'https:';
-  const SERVER_BASE = SERVED ? location.origin : 'http://127.0.0.1:' + LOCAL_PORT;
-  let serverKcc = false; // set by the /health probe below
-  const PROXIES = {
-    local: u => SERVER_BASE + '/proxy?url=' + encodeURIComponent(u),
-    corsproxy: u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
-    allorigins: u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-    codetabs: u => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u),
-    none: u => u,
-    custom: u => (customProxyEl.value.trim() + encodeURIComponent(u)),
-  };
-  function proxify(u){ return (PROXIES[proxyEl.value] || PROXIES.none)(u); }
-
-  const savedProxy = localStorage.getItem('cbz_proxy');
-  if (savedProxy && PROXIES[savedProxy]) proxyEl.value = savedProxy;
-  const savedCustom = localStorage.getItem('cbz_custom_proxy');
-  if (savedCustom) customProxyEl.value = savedCustom;
-  proxyEl.addEventListener('change', () => {
-    localStorage.setItem('cbz_proxy', proxyEl.value);
-    customProxyWrap.style.display = proxyEl.value === 'custom' ? 'block' : 'none';
-  });
-  customProxyEl.addEventListener('change', () => localStorage.setItem('cbz_custom_proxy', customProxyEl.value.trim()));
-  if (proxyEl.value === 'custom') customProxyWrap.style.display = 'block';
+  const SERVER_BASE = SERVED ? location.origin : 'http://127.0.0.1:8788';
+  let serverKcc = false;    // set by the /health probe below
+  let serverBuild = false;  // server can download+assemble+KCC via /build
+  function proxify(u){ return SERVER_BASE + '/proxy?url=' + encodeURIComponent(u); }
 
   // ---------- output format ----------
   const savedFormat = localStorage.getItem('cbz_format');
@@ -229,6 +197,7 @@
     buildBtn.textContent = f==='kcc' ? 'Create Kindle EPUB' : (f==='epub' ? 'Create EPUB' : 'Create CBZ');
     rtlRow.style.display = (f==='epub' || f==='kcc') ? 'flex' : 'none'; // manga (RTL) applies to both
     webtoonRow.style.display = (f==='kcc') ? 'flex' : 'none';           // webtoon splitting is KCC-only
+    splitRow.style.display = serverBuild ? 'flex' : 'none';             // volume-split is server-side only
     syncReadingMode();
   }
   // Webtoon (vertical scroll) has no left/right direction, so RTL is irrelevant there.
@@ -256,8 +225,10 @@
     try {
       const h = await (await fetch(SERVER_BASE + '/health')).json();
       serverKcc = !!(h.kcc && h.sevenzip);
+      serverBuild = !!h.build;
       setStatus(serverKcc ? '● server connected · KCC ready' : '● server connected · KCC unavailable', serverKcc);
       annotateKcc(serverKcc);
+      if (serverBuild) syncFormatUI();  // reveal the split option now the server can do it
     } catch (e) { setStatus('server not reachable', false); annotateKcc(false); }
   })();
 
@@ -310,38 +281,10 @@
     }
   }
 
+  // Page HTML is fetched through the proxy for image-URL extraction. Image bytes are
+  // never downloaded in the browser — the server does that during /build.
   async function fetchVia(u){
     return fetchRetry(proxify(u), {redirect:'follow'}, 'proxy');
-  }
-
-  // Fetch image bytes: try the CDN directly (no proxy) first, fall back to the
-  // proxy if CORS blocks it. After the first direct attempt we remember whether
-  // direct works for this site so we don't spam doomed requests. Both paths back
-  // off on 429/503 via fetchRetry.
-  async function fetchImageBytes(it){
-    let res=null, how='proxy';
-    // When served by the local server, its /proxy is fast AND disk-cached — use it
-    // directly so re-runs hit the cache instead of re-downloading. Only when opened
-    // as a file:// (proxy is a public one) do we try the CDN directly first.
-    if(!SERVED && directMode!==false){
-      try{
-        res=await fetchRetry(it.url, {redirect:'follow'}, 'direct'); how='direct';
-        if(directMode===null) directMode=true;
-      }catch(e){
-        // A real HTTP status means direct reached the server (CORS ok) — just a bad
-        // response, so keep using direct. A network/CORS failure (no .status) means
-        // direct is blocked here; switch to the proxy for the rest of this run.
-        if(e.status===undefined && directMode===null) directMode=false;
-        res=null;
-      }
-    }
-    if(!res){ res=await fetchVia(it.url); how='proxy'; }
-    const blob=await res.blob();
-    const data=new Uint8Array(await blob.arrayBuffer());
-    if(!data.length) throw new Error('empty');
-    it.data=data;
-    it.ext=extFromTypeOrUrl(res.headers.get('content-type'), it.url);
-    return how;
   }
 
   // ---------- extraction ----------
@@ -474,7 +417,7 @@
 
     fetchBtn.disabled=true;
     let added=0, firstTitle='';
-    log(`Fetching ${pages.length} page(s) via ${proxyEl.options[proxyEl.selectedIndex].text}…`);
+    log(`Fetching ${pages.length} page(s) via the local server…`);
     try{
       for(let p=0; p<pages.length; p++){
         const u=pages[p];
@@ -486,7 +429,7 @@
           html=await res.text();
         }catch(err){
           log(`   ✗ fetch failed: ${err.message}`, 'e');
-          if(proxyEl.value==='local') log('     Is the local server running?  →  ./run.sh', 'w');
+          log('     Is the local server running?  →  ./run.sh', 'w');
           continue;
         }
         fetchedPages.add(u);
@@ -518,7 +461,7 @@
   };
 
   clearBtn.onclick=()=>{
-    items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0; directMode=null;
+    items=[]; fetchedPages=new Set(); seenImages=new Set(); chapterCount=0;
     gridEl.innerHTML=''; resultsPanel.style.display='none'; clearLog();
     fnameEl.value='';
   };
@@ -539,347 +482,77 @@
   // Ctrl/Cmd+Enter in the URL box triggers a fetch (plain Enter inserts a newline).
   urlsEl.addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); fetchBtn.click(); } });
 
-  // ---------- concurrency ----------
-  async function mapLimit(arr, limit, fn){
-    const out=new Array(arr.length); let i=0;
-    const workers=Array.from({length:Math.min(limit,arr.length)}, async()=>{
-      while(i<arr.length){ const idx=i++; out[idx]=await fn(arr[idx], idx); }
-    });
-    await Promise.all(workers);
-    return out;
-  }
-
-  // ---------- CRC32 + ZIP (STORED) ----------
-  const CRC_TABLE=(()=>{ const t=new Uint32Array(256);
-    for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xedb88320^(c>>>1):c>>>1; t[n]=c>>>0; } return t; })();
-  function crc32(bytes){ let c=0xffffffff; for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xff]^(c>>>8); return (c^0xffffffff)>>>0; }
-
-  function buildZip(files, mimetype){ // files:[{name,data:Uint8Array}]  (all entries STORED)
-    const enc=new TextEncoder(); const chunks=[]; const central=[]; let offset=0;
-    const now=new Date();
-    const dosTime=(now.getHours()<<11)|(now.getMinutes()<<5)|(now.getSeconds()>>1);
-    const dosDate=((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
-    for(const f of files){
-      const nameBytes=enc.encode(f.name); const crc=crc32(f.data); const size=f.data.length;
-      const lh=new DataView(new ArrayBuffer(30));
-      lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0,true);
-      lh.setUint16(8,0,true); lh.setUint16(10,dosTime,true); lh.setUint16(12,dosDate,true);
-      lh.setUint32(14,crc,true); lh.setUint32(18,size,true); lh.setUint32(22,size,true);
-      lh.setUint16(26,nameBytes.length,true); lh.setUint16(28,0,true);
-      chunks.push(new Uint8Array(lh.buffer), nameBytes, f.data);
-      const ch=new DataView(new ArrayBuffer(46));
-      ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true);
-      ch.setUint16(8,0,true); ch.setUint16(10,0,true); ch.setUint16(12,dosTime,true); ch.setUint16(14,dosDate,true);
-      ch.setUint32(16,crc,true); ch.setUint32(20,size,true); ch.setUint32(24,size,true);
-      ch.setUint16(28,nameBytes.length,true); ch.setUint16(30,0,true); ch.setUint16(32,0,true);
-      ch.setUint16(34,0,true); ch.setUint16(36,0,true); ch.setUint32(38,0,true); ch.setUint32(42,offset,true);
-      central.push({header:new Uint8Array(ch.buffer), name:nameBytes});
-      offset+=30+nameBytes.length+size;
+  // ---------- server-side build (no bytes held in the browser) ----------
+  // The client sends only the URL list; the server downloads, assembles, optionally
+  // splits into volumes, runs KCC, and the result is downloaded via a direct link
+  // (streamed to disk) so the browser never holds the images or the output in memory.
+  async function buildOnServer(sel, fmt, cleanName){
+    const payload = {
+      name: cleanName,
+      author: authorEl.value.trim(),
+      format: fmt,
+      rtl: rtlEl.checked,
+      webtoon: (fmt==='kcc' && webtoonEl.checked),
+      split_mb: (splitEl.checked ? (parseFloat(splitSizeEl.value)||100) : 0),
+      images: sel.map(it=>({url:it.url, chapter:it.chapter})),
+    };
+    clearLog();
+    log(`Server build: sending ${sel.length} image URL(s) (${fmt.toUpperCase()}${payload.split_mb?`, ~${payload.split_mb}MB volumes`:''})…`);
+    setProgress(buildProgress,0.02); buildStatus.textContent='Starting server build…';
+    let job;
+    try{
+      const r=await fetch(SERVER_BASE+'/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      if(!r.ok) throw new Error((await r.text().catch(()=>''))||('HTTP '+r.status));
+      job=(await r.json()).job;
+    }catch(e){
+      setProgress(buildProgress,null);
+      buildStatus.innerHTML=`<span class="pill" style="color:var(--bad)">error</span> Could not start server build — is ./run.sh running? (${e.message})`;
+      log('Build start failed: '+e.message,'e'); return;
     }
-    const centralStart=offset; let centralSize=0;
-    for(const c of central){ chunks.push(c.header,c.name); centralSize+=c.header.length+c.name.length; }
-    const eo=new DataView(new ArrayBuffer(22));
-    eo.setUint32(0,0x06054b50,true); eo.setUint16(4,0,true); eo.setUint16(6,0,true);
-    eo.setUint16(8,files.length,true); eo.setUint16(10,files.length,true);
-    eo.setUint32(12,centralSize,true); eo.setUint32(16,centralStart,true); eo.setUint16(20,0,true);
-    chunks.push(new Uint8Array(eo.buffer));
-    return new Blob(chunks,{type:mimetype||'application/vnd.comicbook+zip'});
-  }
-
-  // ---------- EPUB (fixed-layout, one image per page) ----------
-  function xmlEsc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
-  function mimeFor(ext){
-    return {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp',avif:'image/avif',bmp:'image/bmp',svg:'image/svg+xml'}[(ext||'').toLowerCase()]||'image/jpeg';
-  }
-  function uuidv4(){
-    const b=crypto.getRandomValues(new Uint8Array(16));
-    b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
-    const h=[...b].map(x=>x.toString(16).padStart(2,'0')).join('');
-    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-  }
-  async function imageSize(blob){
-    try{
-      if('createImageBitmap' in window){
-        const bmp=await createImageBitmap(blob);
-        const s={w:bmp.width,h:bmp.height}; if(bmp.close) bmp.close(); return s;
+    let st, lastPhase='';
+    while(true){
+      await sleep(1000);
+      try{ st=await (await fetch(SERVER_BASE+'/build/status?job='+encodeURIComponent(job))).json(); }
+      catch(e){ continue; }  // transient; keep polling
+      if(st.error){
+        setProgress(buildProgress,null);
+        buildStatus.innerHTML=`<span class="pill" style="color:var(--bad)">error</span> ${String(st.error).replace(/\n/g,'<br>')}`;
+        log(st.error,'e'); return;
       }
-    }catch(e){}
-    return await new Promise(res=>{
-      const url=URL.createObjectURL(blob), im=new Image();
-      im.onload=()=>{ res({w:im.naturalWidth,h:im.naturalHeight}); URL.revokeObjectURL(url); };
-      im.onerror=()=>{ res({w:0,h:0}); URL.revokeObjectURL(url); };
-      im.src=url;
-    });
-  }
-
-  function buildEpub(pages, meta){ // pages:[{data,ext,w,h}]  meta:{title,author,rtl}
-    const enc=new TextEncoder();
-    const id='urn:uuid:'+uuidv4();
-    const modified=new Date().toISOString().replace(/\.\d+Z$/,'Z');
-    const title=xmlEsc(meta.title||'Comic'), author=xmlEsc(meta.author||'Unknown');
-    const padLen=Math.max(3,String(pages.length).length);
-    const num=i=>String(i+1).padStart(padLen,'0');
-    const files=[];
-
-    // mimetype MUST be the first entry and STORED — our zip writer stores everything.
-    files.push({name:'mimetype', data:enc.encode('application/epub+zip')});
-    files.push({name:'META-INF/container.xml', data:enc.encode(
-`<?xml version="1.0" encoding="UTF-8"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles>
-    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-  </rootfiles>
-</container>`)});
-
-    let manifest='', spine='';
-    pages.forEach((p,i)=>{
-      const n=num(i);
-      manifest+=`    <item id="page-${n}" href="page-${n}.xhtml" media-type="application/xhtml+xml"/>\n`;
-      manifest+=`    <item id="img-${n}" href="images/img-${n}.${p.ext}" media-type="${mimeFor(p.ext)}"${i===0?' properties="cover-image"':''}/>\n`;
-      spine+=`    <itemref idref="page-${n}"/>\n`;
-    });
-
-    files.push({name:'OEBPS/content.opf', data:enc.encode(
-`<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="bookid">${id}</dc:identifier>
-    <dc:title>${title}</dc:title>
-    <dc:creator>${author}</dc:creator>
-    <dc:language>en</dc:language>
-    <meta property="dcterms:modified">${modified}</meta>
-    <meta property="rendition:layout">pre-paginated</meta>
-    <meta property="rendition:orientation">auto</meta>
-    <meta property="rendition:spread">auto</meta>
-    <meta name="cover" content="img-${num(0)}"/>
-  </metadata>
-  <manifest>
-    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
-${manifest}  </manifest>
-  <spine toc="ncx"${meta.rtl?' page-progression-direction="rtl"':''}>
-${spine}  </spine>
-</package>`)});
-
-    files.push({name:'OEBPS/nav.xhtml', data:enc.encode(
-`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
-<head><meta charset="utf-8"/><title>${title}</title></head>
-<body>
-  <nav epub:type="toc" id="toc"><h1>${title}</h1>
-    <ol><li><a href="page-${num(0)}.xhtml">Start</a></li></ol>
-  </nav>
-  <nav epub:type="landmarks" hidden="hidden">
-    <ol><li><a epub:type="bodymatter" href="page-${num(0)}.xhtml">Start</a></li></ol>
-  </nav>
-</body>
-</html>`)});
-
-    files.push({name:'OEBPS/toc.ncx', data:enc.encode(
-`<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="${id}"/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle><text>${title}</text></docTitle>
-  <navMap>
-    <navPoint id="np-1" playOrder="1"><navLabel><text>Start</text></navLabel><content src="page-${num(0)}.xhtml"/></navPoint>
-  </navMap>
-</ncx>`)});
-
-    pages.forEach((p,i)=>{
-      const n=num(i), w=p.w||800, h=p.h||1200;
-      files.push({name:`OEBPS/page-${n}.xhtml`, data:enc.encode(
-`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-<head>
-  <meta charset="utf-8"/>
-  <title>Page ${i+1}</title>
-  <meta name="viewport" content="width=${w}, height=${h}"/>
-  <style>html,body{margin:0;padding:0}body{width:${w}px;height:${h}px}img{width:100%;height:100%;display:block}</style>
-</head>
-<body><img src="images/img-${n}.${p.ext}" alt="Page ${i+1}"/></body>
-</html>`)});
-      files.push({name:`OEBPS/images/img-${n}.${p.ext}`, data:p.data});
-    });
-
-    return buildZip(files, 'application/epub+zip');
-  }
-
-  function extFromTypeOrUrl(type, url){
-    const t=(type||'').toLowerCase();
-    if(t.includes('jpeg')||t.includes('jpg')) return 'jpg';
-    if(t.includes('png')) return 'png';
-    if(t.includes('webp')) return 'webp';
-    if(t.includes('gif')) return 'gif';
-    if(t.includes('avif')) return 'avif';
-    if(t.includes('bmp')) return 'bmp';
-    const m=url.split(/[?#]/)[0].match(/\.([a-z0-9]+)$/i);
-    return m?m[1].toLowerCase():'jpg';
-  }
-  const pad=(n,len)=>String(n).padStart(len,'0');
-
-  // Read image dimensions straight from the header bytes (no full decode) for the
-  // common formats. Much faster than createImageBitmap when grouping a webtoon of
-  // many/large WebP/JPEG strips. Returns {w,h} or null (caller falls back to decode).
-  function dimsFromBytes(u8){
-    try{
-      const n=u8.length, dv=new DataView(u8.buffer, u8.byteOffset, n);
-      if(n>24 && u8[0]===0x89&&u8[1]===0x50&&u8[2]===0x4E&&u8[3]===0x47)      // PNG
-        return {w:dv.getUint32(16), h:dv.getUint32(20)};
-      if(n>10 && u8[0]===0x47&&u8[1]===0x49&&u8[2]===0x46)                    // GIF
-        return {w:dv.getUint16(6,true), h:dv.getUint16(8,true)};
-      if(n>30 && u8[0]===0x52&&u8[1]===0x49&&u8[2]===0x46&&u8[3]===0x46 &&    // WebP (RIFF..WEBP)
-         u8[8]===0x57&&u8[9]===0x45&&u8[10]===0x42&&u8[11]===0x50){
-        const cc=String.fromCharCode(u8[12],u8[13],u8[14],u8[15]);
-        if(cc==='VP8 ') return {w:dv.getUint16(26,true)&0x3fff, h:dv.getUint16(28,true)&0x3fff};
-        if(cc==='VP8L'){ const b0=u8[21],b1=u8[22],b2=u8[23],b3=u8[24];
-          return {w:1+((( b1&0x3f)<<8)|b0), h:1+(((b3&0x0f)<<10)|(b2<<2)|((b1&0xc0)>>6))}; }
-        if(cc==='VP8X') return {w:1+(u8[24]|u8[25]<<8|u8[26]<<16), h:1+(u8[27]|u8[28]<<8|u8[29]<<16)};
+      if(st.phase!==lastPhase){ lastPhase=st.phase; log('… '+(st.message||st.phase)); }
+      if(st.phase==='download' && st.total){
+        setProgress(buildProgress, st.done/st.total);
+        buildStatus.textContent=`Downloading on server… ${st.done}/${st.total}`;
+      }else{
+        setProgress(buildProgress, null);
+        buildStatus.textContent=(st.message||st.phase)+(st.vol_total>1?` (${(st.vol_done||0)+1}/${st.vol_total})`:'');
       }
-      if(n>4 && u8[0]===0xFF&&u8[1]===0xD8){                                  // JPEG: scan SOF markers
-        let o=2;
-        while(o+9<n){
-          if(u8[o]!==0xFF){ o++; continue; }
-          const m=u8[o+1];
-          if(m===0xFF){ o++; continue; }
-          if((m>=0xD0&&m<=0xD9)){ o+=2; continue; }          // standalone markers (incl. SOI/EOI/RST)
-          const len=dv.getUint16(o+2);
-          if(m>=0xC0&&m<=0xCF && m!==0xC4&&m!==0xC8&&m!==0xCC) // SOF0..SOF15 (real frame headers)
-            return {h:dv.getUint16(o+5), w:dv.getUint16(o+7)};
-          o+=2+len;
-        }
-      }
-    }catch(e){}
-    return null;
+      if(st.ready) break;
+    }
+    // Download the finished file via a direct link: the browser streams it to disk,
+    // so a multi-GB result is never held in JS memory.
+    const a=document.createElement('a');
+    a.href=SERVER_BASE+'/build/result?job='+encodeURIComponent(job);
+    if(st.filename) a.download=st.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setProgress(buildProgress,null);
+    buildStatus.innerHTML=`<span class="pill">done</span> ${st.message||'Done.'} Downloading <b>${st.filename||'file'}</b>…`;
+    log(`Server build complete → ${st.filename}${st.failed?` (${st.failed} images skipped)`:''}`, 'ok');
   }
 
-  // KCC's webtoon merge (comic2panel) concatenates every image IN A DIRECTORY into one
-  // strip and hard-errors if that strip exceeds 524288px tall. So for webtoon mode we
-  // group images into numbered subfolders, keeping each folder's cumulative source
-  // height under a safe cap (and starting a fresh folder at chapter boundaries). KCC
-  // then merges/splits each folder independently and stitches them back in order.
-  const WEBTOON_CAP = 480000; // safely under KCC's 524288 px per-directory limit
-  async function buildWebtoonCbz(ok){
-    buildStatus.textContent='Reading image sizes…';
-    const measured = await mapLimit(ok, 4, async r => {
-      let d = dimsFromBytes(r.data);                 // fast header read, no decode
-      if(!d || !d.h){                                 // fall back to a full decode
-        const sz = await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
-        d = {h:sz.h};
-      }
-      return {data:r.data, ext:r.ext, chapter:r.chapter, h:(d.h||0)};
-    });
-    const files=[]; let folder=0, cum=0, inFolder=0, lastChapter=null, oversized=0;
-    measured.forEach((m,i)=>{
-      const h=m.h||0;
-      if(h>WEBTOON_CAP) oversized++;
-      const chapterChanged = (m.chapter!=null && m.chapter!==lastChapter);
-      if(i>0 && (chapterChanged || cum+h>WEBTOON_CAP)){ folder++; cum=0; inFolder=0; }
-      lastChapter=m.chapter; cum+=h; inFolder++;
-      files.push({name:`${pad(folder+1,4)}/${pad(inFolder,4)}.${m.ext}`, data:m.data});
-    });
-    if(oversized) log(`Warning: ${oversized} image(s) exceed ${WEBTOON_CAP}px tall on their own — KCC may still reject those. Consider splitting them first.`, 'w');
-    return {cbz:buildZip(files), count:measured.length, folders:folder+1};
-  }
-
-  // ---------- build CBZ ----------
+  // ---------- build ----------
   buildBtn.onclick=async()=>{
     const sel=items.filter(i=>i.selected);
     if(!sel.length){ buildStatus.textContent='Select at least one image.'; return; }
-    buildBtn.disabled=true; fetchBtn.disabled=true;
-    setProgress(buildProgress,0); buildStatus.textContent='Downloading images…';
-    const padLen=String(sel.length).length<3?3:String(sel.length).length;
-    let done=0; const failed=[];
-
-    let fetched=0, viaDirect=0, viaProxy=0;
-    const results=await mapLimit(sel, 4, async(it, idx)=>{
-      try{
-        if(!it.data){ // cache bytes so re-builds don't re-download
-          const how=await fetchImageBytes(it);
-          fetched++; if(how==='direct') viaDirect++; else viaProxy++;
-        }
-        return {order:idx, data:it.data, ext:it.ext, chapter:it.chapter};
-      }catch(err){
-        failed.push({url:it.url, err:err.message});
-        return null;
-      }finally{
-        done++; setProgress(buildProgress, done/sel.length);
-        buildStatus.textContent=`Preparing… ${done}/${sel.length}`;
-      }
-    });
-    if(fetched) log(`Fetched ${fetched} image(s): ${viaDirect} direct, ${viaProxy} via proxy.`, 'ok');
-
-    const ok=results.filter(Boolean).sort((a,b)=>a.order-b.order);
-    if(failed.length) log(failed.length+' image(s) failed to download:', 'w'), failed.forEach(f=>log('  ✗ '+f.url+' ('+f.err+')','e'));
-    if(!ok.length){ buildStatus.textContent='All downloads failed — try another proxy.'; buildBtn.disabled=false; fetchBtn.disabled=false; setProgress(buildProgress,null); return; }
-
-    const fmt = formatEl.value;
-    const cleanName=(fnameEl.value.trim()||'comic').replace(/\.(cbz|epub)$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim() || 'comic';
-    let blob, ext, pageCount;
-    try{
-      if(fmt==='epub'){
-        buildStatus.textContent='Reading image sizes…';
-        const pages=await mapLimit(ok, 4, async r=>{
-          const sz=await imageSize(new Blob([r.data],{type:mimeFor(r.ext)}));
-          return {data:r.data, ext:r.ext, w:sz.w, h:sz.h};
-        });
-        buildStatus.textContent='Packaging EPUB…';
-        blob=buildEpub(pages, {title:(fnameEl.value.trim()||'Comic'), author:authorEl.value.trim(), rtl:rtlEl.checked});
-        ext='epub'; pageCount=pages.length;
-      }else if(fmt==='kcc'){
-        // Build the CBZ in-browser, then let the server run KCC on it.
-        const wt = webtoonEl.checked;
-        let cbz;
-        if(wt){
-          const built=await buildWebtoonCbz(ok);
-          cbz=built.cbz; pageCount=built.count;
-          log(`Webtoon: grouped ${built.count} image(s) into ${built.folders} folder(s) to stay under KCC's merge limit.`, 'ok');
-        }else{
-          buildStatus.textContent='Packaging CBZ…';
-          const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
-          cbz=buildZip(files); pageCount=files.length;
-        }
-        buildStatus.textContent='Optimizing with KCC on the server… first run builds KCC (~1 min), then it’s cached.';
-        log('Sending CBZ to server → KCC (profile KoLC, kepub, --forcecolor -u'+(wt?' -w':'')+(!wt&&rtlEl.checked?' -m':'')+')…');
-        const qs='name='+encodeURIComponent(cleanName)+'&author='+encodeURIComponent(authorEl.value.trim())
-                 +'&manga='+((!wt&&rtlEl.checked)?1:0)+'&webtoon='+(wt?1:0);
-        let res;
-        try{
-          res=await fetch(SERVER_BASE+'/kcc?'+qs, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:cbz});
-        }catch(e){ throw new Error('Could not reach the KCC server — start it with ./run.sh and open the page it serves. ('+e.message+')'); }
-        if(!res.ok){ throw new Error('Server KCC step failed:\n'+((await res.text().catch(()=>''))||('HTTP '+res.status))); }
-        blob=await res.blob(); ext='kepub.epub'; // Kobo needs the .kepub.epub extension
-      }else{
-        buildStatus.textContent='Packaging CBZ…';
-        const files=ok.map((r,i)=>({name:`page-${pad(i+1,padLen)}.${r.ext}`, data:r.data}));
-        blob=buildZip(files); ext='cbz'; pageCount=files.length;
-      }
-    }catch(err){
-      setProgress(buildProgress,null);
-      buildStatus.innerHTML=`<span class="pill" style="color:var(--bad)">error</span> ${err.message.replace(/\n/g,'<br>')}`;
-      log(err.message, 'e');
-      buildBtn.disabled=false; fetchBtn.disabled=false;
+    if(!(SERVED && serverBuild)){
+      buildStatus.innerHTML=`<span class="pill" style="color:var(--bad)">error</span> Server not reachable — launch <code>./run.sh</code> and open the page it serves.`;
       return;
     }
-    const totalMB=(blob.size/1048576).toFixed(1);
-
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob); a.download=`${cleanName}.${ext}`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
-
-    setProgress(buildProgress,null);
-    const reused=pageCount-fetched;
-    const kccNote = fmt==='kcc' ? ' · KCC color-optimized (KoLC kepub)' : '';
-    buildStatus.innerHTML=`<span class="pill">done</span> Created <b>${cleanName}.${ext}</b> — ${pageCount} pages, ${totalMB} MB${kccNote}.${reused>0?` (${reused} reused from cache)`:''}${failed.length?` · ${failed.length} skipped`:''}`;
-    log(`${fmt==='kcc'?'Kobo kepub (KCC)':ext.toUpperCase()} created: ${pageCount} pages, ${totalMB} MB.`, 'ok');
-    buildBtn.disabled=false; fetchBtn.disabled=false;
+    const fmt=formatEl.value;
+    const cleanName=(fnameEl.value.trim()||'comic').replace(/\.(cbz|epub|zip)$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim()||'comic';
+    buildBtn.disabled=true; fetchBtn.disabled=true;
+    try{ await buildOnServer(sel, fmt, cleanName); }
+    finally{ buildBtn.disabled=false; fetchBtn.disabled=false; }
   };
 
 })();

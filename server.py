@@ -215,6 +215,31 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
 
+    def _send_file(self, status, path, ctype, extra=None):
+        """Stream a file as the response body (Content-Length from the file size,
+        copied in chunks). Essential for multi-GB KCC output: reading it into RAM
+        and writing in one shot blows up memory and, if the single write breaks
+        partway, leaves the client with fewer bytes than Content-Length declared.
+        Returns True if the full body was sent, False if the client went away."""
+        size = os.path.getsize(path)
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        if getattr(self, "close_connection", False):
+            self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                shutil.copyfileobj(f, self.wfile, 1 << 20)  # 1 MiB chunks
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            self.close_connection = True                    # can't recover mid-body
+            self.log_message("response send interrupted after headers: %s", e)
+            return False
+
     def _text(self, status, msg):
         self._send(status, msg, "text/plain; charset=utf-8")
 
@@ -375,13 +400,15 @@ class Handler(BaseHTTPRequestHandler):
             if not outs:
                 return self._text(500, "KCC produced no output.\n" + (proc.stdout or "")[-1000:])
             produced = outs[0]
-            with open(produced, "rb") as f:
-                epub = f.read()
 
             # Kobo only treats the file as a kepub if the name ends in .kepub.epub.
             dl_ext = ".kepub.epub" if produced.endswith(".kepub.epub") else (os.path.splitext(produced)[1] or ".epub")
-            self._send(200, epub, "application/epub+zip",
-                       {"Content-Disposition": 'attachment; filename="%s%s"' % (name, dl_ext)})
+            self.log_message("sending %s (%d bytes)", os.path.basename(produced), os.path.getsize(produced))
+            # Stream from disk; headers are already committed inside _send_file, so a
+            # mid-body failure must NOT fall through to another response.
+            self._send_file(200, produced, "application/epub+zip",
+                            {"Content-Disposition": 'attachment; filename="%s%s"' % (name, dl_ext)})
+            return
         except subprocess.TimeoutExpired:
             return self._text(504, "KCC timed out.")
         except Exception as e:

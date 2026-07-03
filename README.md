@@ -85,8 +85,20 @@ Override via environment variables when launching:
 | `KCC_FORMAT` | `EPUB` | KCC output format |
 | `KCC_REF` | pinned commit | KCC git tag/branch/commit to build |
 | `KCC_PY` | `3.12` | Python version `uv` builds KCC with |
+| `KCC_TIMEOUT` | `3600` | KCC subprocess time budget (seconds) |
+| `CACHE_DIR` | `.proxy-cache` | on-disk proxy cache location |
+| `CACHE_TTL` | `604800` | proxy cache lifetime in seconds (7 days); `0` disables |
 
 Example: `PROFILE=KPW5 ./run.sh` targets a Paperwhite 5.
+
+### Download cache
+
+Fetched pages and images are cached on disk under `.proxy-cache/` (keyed by URL,
+7-day TTL) so re-running a chapter doesn't re-download every image. When the page
+is served by `./run.sh`, image fetches go through the local `/proxy` so they
+populate and hit this cache. Delete the `.proxy-cache/` folder (or set
+`CACHE_TTL=0`) to clear/disable it. Uploads are streamed to a temp file, so
+multi-GB CBZs (big webtoons) don't blow up server memory.
 
 ## Files
 

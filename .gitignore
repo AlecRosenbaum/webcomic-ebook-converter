@@ -6,3 +6,6 @@ chapters.txt
 *.cbz
 *.epub
 *.kepub.epub
+
+# on-disk proxy cache
+.proxy-cache/

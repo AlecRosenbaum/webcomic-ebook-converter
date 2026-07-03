@@ -319,10 +319,13 @@
   // direct works for this site so we don't spam doomed requests. Both paths back
   // off on 429/503 via fetchRetry.
   async function fetchImageBytes(it){
-    let res=null, how='direct';
-    if(directMode!==false){
+    let res=null, how='proxy';
+    // When served by the local server, its /proxy is fast AND disk-cached — use it
+    // directly so re-runs hit the cache instead of re-downloading. Only when opened
+    // as a file:// (proxy is a public one) do we try the CDN directly first.
+    if(!SERVED && directMode!==false){
       try{
-        res=await fetchRetry(it.url, {redirect:'follow'}, 'direct');
+        res=await fetchRetry(it.url, {redirect:'follow'}, 'direct'); how='direct';
         if(directMode===null) directMode=true;
       }catch(e){
         // A real HTTP status means direct reached the server (CORS ok) — just a bad

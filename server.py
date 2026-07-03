@@ -18,11 +18,14 @@ Start it with ./run.sh, which provides the `7zz` binary (via nix) that KCC needs
 and opens your browser. Standard library only.
 
 Env overrides:
-  PORT        listen port              [8788]
-  PROFILE     KCC device profile       [KoLC  = Kobo Libra Colour]
-  KCC_FORMAT  KCC output format        [EPUB]
+  PORT        listen port                       [8788]
+  PROFILE     KCC device profile                [KoLC  = Kobo Libra Colour]
+  KCC_FORMAT  KCC output format                 [EPUB]
   KCC_REF     KCC git tag/branch/commit pinned for reproducible builds
-  KCC_PY      python uv builds KCC with [3.12]
+  KCC_PY      python uv builds KCC with         [3.12]
+  KCC_TIMEOUT KCC subprocess time budget, sec   [3600]
+  CACHE_DIR   on-disk proxy cache dir           [<here>/.proxy-cache]
+  CACHE_TTL   proxy cache lifetime, seconds     [604800 = 7 days; 0 disables]
 """
 
 import os
@@ -34,6 +37,7 @@ import glob
 import json
 import time
 import datetime
+import hashlib
 import urllib.request
 import urllib.error
 from email.utils import parsedate_to_datetime
@@ -53,12 +57,62 @@ KCC_PY      = os.environ.get("KCC_PY", "3.12")
 MAX_RETRIES     = int(os.environ.get("MAX_RETRIES", "4"))
 MAX_RETRY_WAIT  = float(os.environ.get("MAX_RETRY_WAIT", "30"))  # cap any single wait, seconds
 
+# KCC subprocess time budget (webtoons with thousands of pages are slow).
+KCC_TIMEOUT     = int(os.environ.get("KCC_TIMEOUT", "3600"))     # seconds
+
+# On-disk proxy cache so re-runs don't re-download the same images.
+CACHE_DIR       = os.environ.get("CACHE_DIR", os.path.join(HERE, ".proxy-cache"))
+CACHE_TTL       = float(os.environ.get("CACHE_TTL", str(7 * 24 * 3600)))  # seconds; 0 disables
+
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
 def have(cmd):
     return shutil.which(cmd) is not None
+
+
+def _cache_paths(url):
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    base = os.path.join(CACHE_DIR, h)
+    return base + ".bin", base + ".ct"
+
+
+def cache_get(url):
+    """Return (body, content_type) if a fresh cached copy exists, else None."""
+    if not CACHE_DIR or CACHE_TTL <= 0:
+        return None
+    binp, ctp = _cache_paths(url)
+    try:
+        if (time.time() - os.stat(binp).st_mtime) > CACHE_TTL:
+            return None
+        with open(binp, "rb") as f:
+            body = f.read()
+        ct = "application/octet-stream"
+        try:
+            with open(ctp, "r") as f:
+                ct = f.read().strip() or ct
+        except OSError:
+            pass
+        return body, ct
+    except OSError:
+        return None
+
+
+def cache_put(url, body, ctype):
+    if not CACHE_DIR or CACHE_TTL <= 0 or not body:
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        binp, ctp = _cache_paths(url)
+        tmp = binp + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(body)
+        os.replace(tmp, binp)                       # atomic swap into place
+        with open(ctp, "w") as f:
+            f.write(ctype or "application/octet-stream")
+    except OSError:
+        pass
 
 
 def retry_after_seconds(headers):
@@ -98,30 +152,51 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Expose-Headers", "Retry-After")
         self.send_header("Access-Control-Allow-Private-Network", "true")
 
-    def _read_body(self):
-        """Fully consume the request body (Content-Length or chunked). Leaving any
-        of it unread on a keep-alive connection makes the server parse the leftover
-        as the next request (the 'Bad HTTP request' / PK.. garbage failure)."""
-        te = (self.headers.get("Transfer-Encoding") or "").lower()
-        if "chunked" in te:
-            chunks = []
-            while True:
-                line = self.rfile.readline(65537).split(b";", 1)[0].strip()
-                try:
-                    size = int(line, 16)
-                except ValueError:
-                    break
-                if size == 0:
-                    while True:                       # consume trailers up to blank line
-                        t = self.rfile.readline(65537)
-                        if t in (b"\r\n", b"\n", b""):
+    def _spool_body(self):
+        """Stream the request body to a temp file and return (path, bytes_written).
+        Streaming (not buffering in RAM) is essential: a webtoon CBZ can be many GB,
+        and reading it all into memory would MemoryError -> empty body -> spurious 400.
+        Handles Content-Length and chunked. Fully consuming the body also prevents a
+        leftover-body keep-alive desync."""
+        fd, path = tempfile.mkstemp(prefix="upload_", suffix=".cbz")
+        total, CH = 0, 1 << 20  # 1 MiB chunks
+        try:
+            with os.fdopen(fd, "wb") as out:
+                te = (self.headers.get("Transfer-Encoding") or "").lower()
+                if "chunked" in te:
+                    while True:
+                        line = self.rfile.readline(65537).split(b";", 1)[0].strip()
+                        try:
+                            size = int(line, 16)
+                        except ValueError:
                             break
-                    break
-                chunks.append(self.rfile.read(size))
-                self.rfile.read(2)                    # trailing CRLF after each chunk
-            return b"".join(chunks)
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        return self.rfile.read(length) if length > 0 else b""
+                        if size == 0:
+                            while True:               # consume trailers up to blank line
+                                t = self.rfile.readline(65537)
+                                if t in (b"\r\n", b"\n", b""):
+                                    break
+                            break
+                        rem = size
+                        while rem > 0:
+                            buf = self.rfile.read(min(rem, CH))
+                            if not buf:
+                                break
+                            out.write(buf); total += len(buf); rem -= len(buf)
+                        self.rfile.read(2)            # trailing CRLF after each chunk
+                else:
+                    rem = int(self.headers.get("Content-Length", "0") or "0")
+                    while rem > 0:
+                        buf = self.rfile.read(min(rem, CH))
+                        if not buf:
+                            break
+                        out.write(buf); total += len(buf); rem -= len(buf)
+        except Exception:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
+        return path, total
 
     def _send(self, status, body, ctype, extra=None):
         if isinstance(body, str):
@@ -160,21 +235,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             return self._json(200, {"ok": True,
                                     "kcc": have("uvx") or have("uv"),
-                                    "sevenzip": have("7zz") or have("7z")})
+                                    "sevenzip": have("7zz") or have("7z"),
+                                    "cache": bool(CACHE_DIR and CACHE_TTL > 0)})
         return self._text(404, "Not found")
 
     def do_POST(self):
-        # Always consume the body up front (before any early return) and don't reuse
-        # the connection for a POST — a KCC upload is a one-shot heavy request, and
-        # this makes a leftover-body / keep-alive desync impossible.
+        # Stream the body to disk up front (before any early return) and don't reuse
+        # the connection for a POST — makes both OOM on huge uploads and a leftover-body
+        # keep-alive desync impossible.
         self.close_connection = True
+        self._body_path, self._body_len = None, 0
         try:
-            self._post_body = self._read_body()
-        except Exception:
-            self._post_body = b""
-        if urlparse(self.path).path == "/kcc":
-            return self._kcc()
-        return self._text(404, "Not found")
+            self._body_path, self._body_len = self._spool_body()
+        except Exception as e:
+            self.log_message("body read failed: %s", e)
+        self.log_message("POST %s  CL=%s TE=%s Expect=%s -> spooled %d bytes",
+                         urlparse(self.path).path,
+                         self.headers.get("Content-Length"),
+                         self.headers.get("Transfer-Encoding"),
+                         self.headers.get("Expect"), self._body_len)
+        try:
+            if urlparse(self.path).path == "/kcc":
+                return self._kcc()
+            return self._text(404, "Not found")
+        finally:
+            if self._body_path and os.path.exists(self._body_path):
+                try:
+                    os.remove(self._body_path)
+                except OSError:
+                    pass
 
     def _serve_page(self):
         try:
@@ -190,6 +279,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._text(400, "Missing ?url= parameter")
         if not target.startswith(("http://", "https://")):
             return self._text(400, "URL must start with http:// or https://")
+
+        cached = cache_get(target)
+        if cached is not None:
+            body, ctype = cached
+            return self._send(200, body, ctype, {"X-Cache": "HIT"})
 
         origin = "{0.scheme}://{0.netloc}".format(urlparse(target))
         req = urllib.request.Request(target, headers={
@@ -228,6 +322,9 @@ class Handler(BaseHTTPRequestHandler):
         # client can keep respecting it.
         if status in (429, 503) and headers and headers.get("Retry-After"):
             extra["Retry-After"] = headers.get("Retry-After")
+        if status == 200:
+            cache_put(target, body, ctype)
+            extra["X-Cache"] = "MISS"
         self._send(status, body, ctype, extra)
 
     def _kcc(self):
@@ -242,16 +339,14 @@ class Handler(BaseHTTPRequestHandler):
         manga = (q.get("manga") or ["0"])[0] in ("1", "true", "yes")
         webtoon = (q.get("webtoon") or ["0"])[0] in ("1", "true", "yes")
 
-        data = getattr(self, "_post_body", b"")
-        if not data:
+        if not self._body_path or self._body_len <= 0:
             return self._text(400, "Empty upload (expected a CBZ body).")
 
         tmp = tempfile.mkdtemp(prefix="kcc_")
         try:
             outdir = os.path.join(tmp, "out"); os.makedirs(outdir)
             infile = os.path.join(tmp, name + ".cbz")
-            with open(infile, "wb") as f:
-                f.write(data)
+            shutil.move(self._body_path, infile)   # hand the streamed upload straight to KCC
 
             # No --nokepub -> KCC emits a Kobo .kepub.epub. --forcecolor keeps color
             # (KCC converts to grayscale by default) for the color e-ink screen.
@@ -269,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self.log_message("running KCC: %s", " ".join(cmd))
             proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True,
-                                  timeout=600, env=os.environ.copy())
+                                  timeout=KCC_TIMEOUT, env=os.environ.copy())
             if proc.returncode != 0:
                 tail = (proc.stderr or proc.stdout or "").strip()[-1500:]
                 return self._text(500, "KCC exited %d:\n%s" % (proc.returncode, tail))
@@ -304,6 +399,8 @@ def main():
     print("Webcomic -> Kindle server: http://127.0.0.1:%d/" % PORT)
     print("  proxy: /proxy?url=...   KCC: POST /kcc   (profile=%s format=%s)" % (KCC_PROFILE, KCC_FORMAT))
     print("  7zz on PATH: %s | uv/uvx on PATH: %s" % (have("7zz") or have("7z"), have("uvx") or have("uv")))
+    if CACHE_DIR and CACHE_TTL > 0:
+        print("  proxy cache: %s (TTL %.0fh) — delete it to clear" % (CACHE_DIR, CACHE_TTL / 3600))
     print("  Ctrl+C to stop.")
     try:
         httpd.serve_forever()

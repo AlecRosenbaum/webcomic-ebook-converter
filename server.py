@@ -419,7 +419,8 @@ def assemble_kcc_input(items, root, webtoon):
 
 def split_volumes(items, target_bytes):
     """Partition ordered images into ~target_bytes volumes, keeping whole chapters
-    together (a single oversized chapter becomes its own volume). target_bytes<=0
+    together where possible. A chapter that's larger than the target on its own is
+    split by size (so a single long crawled chapter still splits). target_bytes<=0
     => one volume (no split)."""
     if target_bytes <= 0:
         return [items]
@@ -431,11 +432,30 @@ def split_volumes(items, target_bytes):
         cur.append(m); last = ch
     if cur:
         chapters.append(cur)
+
     vols, v, vsize = [], [], 0
+    def flush():
+        if v:
+            vols.append(v)
+        return [], 0
+
     for chap in chapters:
         csize = sum(m.get("size", 0) for m in chap)
+        if csize > target_bytes:
+            # Oversized single chapter: close the current volume, then split this
+            # chapter by cumulative size.
+            v, vsize = flush()
+            cv, cs = [], 0
+            for m in chap:
+                ms = m.get("size", 0)
+                if cv and cs + ms > target_bytes:
+                    vols.append(cv); cv, cs = [], 0
+                cv.append(m); cs += ms
+            if cv:
+                vols.append(cv)
+            continue
         if v and vsize + csize > target_bytes:
-            vols.append(v); v, vsize = [], 0
+            v, vsize = flush()
         v.extend(chap); vsize += csize
     if v:
         vols.append(v)

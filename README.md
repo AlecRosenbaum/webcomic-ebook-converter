@@ -24,8 +24,12 @@ Then open <http://127.0.0.1:8788/>. For local development without Docker, use
 Once the page is open:
 
 1. Paste one or more **chapter/page URLs** (one per line) — they're fetched in
-   order and merged into a single book.
-2. Click **Fetch all**. Thumbnails appear, grouped by chapter.
+   order and merged into a single book. For "single image + next button" comics,
+   tick **Crawl** and paste just the first page; it follows the `next` link to the
+   end (starting a new chapter each time the URL path changes, e.g.
+   `…/The_Hook/2` → `…/Rushes/1`).
+2. Click **Fetch all**. Thumbnails appear, grouped by chapter (only the first
+   chapter is expanded — click a header, or Expand all, to see the rest).
 3. **Pick & order**: untick junk (ads/banners), drag tiles to reorder. Pages are
    numbered continuously across all chapters.
 4. Choose a **Format** (optionally tick **Webtoon mode** and/or **Split into
@@ -181,6 +185,11 @@ Notes:
 - Sites that build their image list with JavaScript (lazy loading) may return few
   or no images from the raw HTML — use the **Add image URLs manually** box for
   those.
+- **Crawl mode** detects the "next" link via `rel="next"`, then `title`/`aria-label`/
+  `class`/`id`/child-`<img>` or link-text signals. Repeated nav icons dedupe across
+  pages; **Deselect small (<300px)** clears them in one click. It stops at the last
+  page (no next / self-link), an already-visited page, or the page limit. If a site's
+  "next" isn't detected, fall back to listing chapter URLs (crawl off).
 - WebP isn't a core EPUB image type; JPEG/PNG (the usual webcomic case) are safest
   for older e-readers.
 - **Webtoon mode**: KCC merges each folder of images into one strip and rejects any

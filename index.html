@@ -101,6 +101,13 @@
   <div class="panel">
     <label for="urls">Chapter / page URLs <span style="opacity:.6">— one per line, fetched in order and merged into one book</span></label>
     <textarea id="urls" rows="4" placeholder="https://example.com/comic/chapter-1&#10;https://example.com/comic/chapter-2&#10;https://example.com/comic/chapter-3"></textarea>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:13px; color:var(--text); cursor:pointer">
+      <input type="checkbox" id="crawl" style="width:auto"> Crawl — follow “next” links from each URL above
+      <span style="color:var(--muted)">up to</span>
+      <input type="number" id="crawlMax" value="500" min="1" style="width:78px; padding:4px 6px"> pages
+    </label>
+    <div class="hint" id="crawlHint" style="display:none; margin-top:6px">For single-image "next button" comics. New chapters are detected when the URL path changes (e.g. <code>…/The_Hook/2</code> → <code>…/Rushes/1</code>). Repeated nav icons dedupe; use “Deselect small” to drop them.</div>
+
     <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap">
       <button id="fetchBtn" class="primary">Fetch all</button>
       <button id="clearBtn">Clear</button>
@@ -174,8 +181,9 @@
 
   // ---------- elements ----------
   const $ = id => document.getElementById(id);
-  const urlsEl=$('urls');
+  const urlsEl=$('urls'), crawlEl=$('crawl'), crawlMaxEl=$('crawlMax');
   const fetchBtn=$('fetchBtn'), clearBtn=$('clearBtn'), logEl=$('log');
+  crawlEl.addEventListener('change',()=>{ $('crawlHint').style.display=crawlEl.checked?'block':'none'; });
   const fetchProgress=$('fetchProgress'), buildProgress=$('buildProgress');
   const resultsPanel=$('resultsPanel'), gridEl=$('grid'), countEl=$('count');
   const fnameEl=$('fname'), buildBtn=$('buildBtn'), buildStatus=$('buildStatus');
@@ -353,10 +361,11 @@
     items.forEach((it, gi)=>{
       const last=groups[groups.length-1];
       if(last && last.chapter===it.chapter) last.entries.push({it, gi});
-      else groups.push({chapter:it.chapter, chapterUrl:it.chapterUrl, entries:[{it, gi}]});
+      else groups.push({chapter:it.chapter, chapterUrl:it.chapterUrl, chapterName:it.chapterName, entries:[{it, gi}]});
     });
     return groups;
   }
+  const esc=s=>String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
   function updateChapterHeader(ch){
     const el=gridEl.querySelector(`.chap[data-chapter="${ch}"] .cc`);
@@ -406,8 +415,9 @@
       const header=document.createElement('div');
       header.className='chap'+(open?' open':'');
       header.dataset.chapter=g.chapter;
-      header.innerHTML=`<span class="caret">▶</span> Chapter ${g.chapter} `
-        + `<span class="src">${g.chapterUrl||''}</span> `
+      const title = g.chapterName ? `${g.chapter}. ${esc(g.chapterName)}` : `Chapter ${g.chapter}`;
+      header.innerHTML=`<span class="caret">▶</span> ${title} `
+        + `<span class="src">${esc(g.chapterUrl||'')}</span> `
         + `<span class="cc">${sel}/${g.entries.length} selected</span>`;
       header.onclick=()=>{
         if(expandedChapters.has(g.chapter)) expandedChapters.delete(g.chapter);
@@ -460,57 +470,127 @@
   $('expandAll').onclick=()=>{ expandedChapters=new Set(items.map(i=>i.chapter)); render(); };
   $('collapseAll').onclick=()=>{ expandedChapters=new Set(); render(); };
 
+  // ---------- fetch helpers (shared by list + crawl) ----------
+  function setDefaultName(seed){
+    if(fnameEl.value) return;
+    const base=(seed||'comic').replace(/\.[a-z0-9]+$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim().slice(0,80);
+    fnameEl.value=base||'comic';
+  }
+  function addImagesFromPage(html, pageUrl, chapter, chapterName){
+    const {urls:imgs, title}=extractImages(html, pageUrl);
+    let added=0;
+    imgs.forEach(iu=>{
+      if(seenImages.has(iu)) return;
+      seenImages.add(iu);
+      items.push({url:iu, selected:true, naturalW:0, chapter, chapterName, chapterUrl:pageUrl});
+      added++;
+    });
+    return {added, title};
+  }
+
+  // Derive a "chapter key" (stable across pages of the same chapter) and label from a
+  // URL by dropping a trailing page-number segment: …/The_Hook/2 -> key …/TPoH/The_Hook,
+  // label "The Hook". A new key while crawling starts a new chapter.
+  function chapterParts(u){
+    try{
+      const url=new URL(u);
+      let segs=url.pathname.split('/').filter(Boolean);
+      if(segs.length && /^(p(age)?[-_]?)?\d+$/i.test(segs[segs.length-1])) segs.pop();
+      const label=decodeURIComponent(segs[segs.length-1]||url.host).replace(/[_-]+/g,' ').trim();
+      return {key:url.host+'/'+segs.join('/'), label};
+    }catch{ return {key:u, label:''}; }
+  }
+
+  // Find the "next page" link on a comic page. Prefers rel=next, then title/aria/class/
+  // id/child-<img> signals, then link text. Skips self-links and javascript:.
+  function findNextUrl(html, baseUrl){
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    let cur; try{ cur=new URL(baseUrl).href; }catch{ cur=baseUrl; }
+    const abs=h=>{ try{ return new URL(h, baseUrl).href; }catch{ return null; } };
+    const rel=[], strong=[], weak=[];
+    doc.querySelectorAll('link[rel~="next" i][href], a[rel~="next" i][href]').forEach(el=>rel.push(el.getAttribute('href')));
+    doc.querySelectorAll('a[href]').forEach(a=>{
+      const href=a.getAttribute('href'); if(!href) return;
+      const img=a.querySelector('img');
+      const attrs=((a.getAttribute('title')||'')+' '+(a.getAttribute('aria-label')||'')+' '+(a.className||'')+' '+(a.id||'')+' '
+        +(img?((img.getAttribute('alt')||'')+' '+(img.getAttribute('src')||'')+' '+(img.className||'')):'')).toLowerCase();
+      const text=(a.textContent||'').trim().toLowerCase();
+      if(/(^|[^a-z])next([^a-z]|$)|arrow[_-]?next|→|›|»/.test(attrs)) strong.push(href);
+      else if(/^(next|next ?page|next ?›|›|→|»|forward)$/.test(text)) weak.push(href);
+    });
+    for(const h of [...rel, ...strong, ...weak]){
+      if(!h || /^\s*(javascript:|#)/i.test(h)) continue;
+      const a=abs(h);
+      if(a && a!==cur) return a;
+    }
+    return null;
+  }
+
   // ---------- main fetch flow ----------
+  async function listFetch(all){
+    const pages = all.filter(u=>!fetchedPages.has(u));
+    if(!pages.length){ log('All listed URLs were already fetched. Edit the list or press Clear to start over.', 'w'); return; }
+    let added=0, firstTitle='';
+    log(`Fetching ${pages.length} page(s) via the local server…`);
+    for(let p=0; p<pages.length; p++){
+      const u=pages[p];
+      setProgress(fetchProgress,(p+0.5)/pages.length);
+      log(`[${p+1}/${pages.length}] ${u}`);
+      let html;
+      try{ const res=await fetchVia(u); html=await res.text(); }
+      catch(err){ log(`   ✗ fetch failed: ${err.message}`, 'e'); log('     Is the local server running?  →  ./run.sh', 'w'); continue; }
+      fetchedPages.add(u); chapterCount++;
+      const {added:a, title}=addImagesFromPage(html, u, chapterCount, chapterParts(u).label);
+      if(!firstTitle && title) firstTitle=title;
+      added+=a;
+      log(a ? `   ✓ ${a} image(s) (chapter ${chapterCount})` : '   no new images found on this page', a?'ok':'w');
+    }
+    setDefaultName(firstTitle || nameFromUrl(pages[0]));
+    if(items.length){ resultsPanel.style.display='block'; render(); }
+    log(`Done — added ${added} image(s); ${items.length} total across ${chapterCount} chapter(s).`, added?'ok':'w');
+    if(!added && !items.length) log('No images found. Try the manual box below.', 'w');
+  }
+
+  async function crawlFetch(starts){
+    const maxPages=Math.max(1, parseInt(crawlMaxEl.value,10)||500);
+    let added=0, firstTitle='';
+    for(const start of starts){
+      if(fetchedPages.has(start)){ log('skip (already fetched): '+start, 'w'); continue; }
+      log(`Crawling from ${start} (max ${maxPages} pages)…`);
+      let url=start, n=0, curKey=null;
+      while(url && n<maxPages){
+        if(fetchedPages.has(url)){ log('   reached an already-visited page — stopping.', 'w'); break; }
+        let html;
+        try{ const res=await fetchVia(url); html=await res.text(); }
+        catch(err){ log(`   ✗ fetch failed: ${err.message} — stopping.`, 'e'); break; }
+        fetchedPages.add(url); n++;
+        const {key, label}=chapterParts(url);
+        if(key!==curKey){ curKey=key; chapterCount++; log(`   ▶ chapter ${chapterCount}: ${label||key}`, 'ok'); }
+        const {added:a, title}=addImagesFromPage(html, url, chapterCount, label);
+        if(!firstTitle && title) firstTitle=title;
+        added+=a;
+        setProgress(fetchProgress, Math.min(n/maxPages, 0.98));
+        if(n%10===0) log(`   …${n} pages, ${added} images so far`);
+        const next=findNextUrl(html, url);
+        if(!next){ log(`   no “next” link — end of crawl (${n} pages).`, 'ok'); break; }
+        url=next;
+        await sleep(120);   // be gentle
+      }
+      if(n>=maxPages) log(`   hit the ${maxPages}-page limit — raise it and Fetch all again to continue.`, 'w');
+    }
+    setDefaultName(firstTitle || nameFromUrl(starts[0]));
+    if(items.length){ resultsPanel.style.display='block'; render(); }
+    log(`Crawl done — added ${added} image(s); ${items.length} total across ${chapterCount} chapter(s).`, added?'ok':'w');
+    if(!added) log('No images found — the “next” detection may not fit this site. Try the manual box, or paste chapter URLs without crawl.', 'w');
+  }
+
   fetchBtn.onclick=async()=>{
     const all = urlsEl.value.split('\n').map(s=>s.trim()).filter(Boolean);
     if(!all.length){ urlsEl.focus(); return; }
-    const pages = all.filter(u=>!fetchedPages.has(u)); // only fetch ones we haven't already
     clearLog();
-    if(!pages.length){ log('All listed URLs were already fetched. Edit the list or press Clear to start over.', 'w'); return; }
-
     fetchBtn.disabled=true;
-    let added=0, firstTitle='';
-    log(`Fetching ${pages.length} page(s) via the local server…`);
-    try{
-      for(let p=0; p<pages.length; p++){
-        const u=pages[p];
-        setProgress(fetchProgress,(p+0.5)/pages.length);
-        log(`[${p+1}/${pages.length}] ${u}`);
-        let html;
-        try{
-          const res=await fetchVia(u);
-          html=await res.text();
-        }catch(err){
-          log(`   ✗ fetch failed: ${err.message}`, 'e');
-          log('     Is the local server running?  →  ./run.sh', 'w');
-          continue;
-        }
-        fetchedPages.add(u);
-        chapterCount++;
-        const {urls:imgs, title}=extractImages(html, u);
-        if(!firstTitle && title) firstTitle=title;
-        let chapAdded=0;
-        imgs.forEach(iu=>{
-          if(seenImages.has(iu)) return;
-          seenImages.add(iu);
-          items.push({url:iu, selected:true, naturalW:0, chapter:chapterCount, chapterUrl:u});
-          chapAdded++; added++;
-        });
-        if(chapAdded) log(`   ✓ ${chapAdded} image(s) (chapter ${chapterCount})`, 'ok');
-        else log('   no new images found on this page', 'w');
-      }
-
-      if(!fnameEl.value && (firstTitle || items.length)){
-        const seed = firstTitle || nameFromUrl(pages[0]) || 'comic';
-        const base = seed.replace(/\.[a-z0-9]+$/i,'').replace(/[\\/:*?"<>|]+/g,' ').trim().slice(0,80);
-        fnameEl.value = base || 'comic';
-      }
-      if(items.length){ resultsPanel.style.display='block'; render(); }
-      log(`Done — added ${added} image(s); ${items.length} total across ${chapterCount} chapter(s).`, added?'ok':'w');
-      if(!added && !items.length) log('No images found. Try another proxy, or add image URLs manually below.', 'w');
-    }finally{
-      fetchBtn.disabled=false; setProgress(fetchProgress,null);
-    }
+    try{ await (crawlEl.checked ? crawlFetch(all) : listFetch(all)); }
+    finally{ fetchBtn.disabled=false; setProgress(fetchProgress,null); }
   };
 
   clearBtn.onclick=()=>{
